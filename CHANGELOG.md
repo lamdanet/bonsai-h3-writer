@@ -8,6 +8,55 @@ The section of a version becomes the notes of its GitHub release (see `docs/RELE
 
 ## [Unreleased]
 
+### Added
+
+- **Bonsai describes reference pictures once.** In the Write workspace, a picture picked for a
+  reference is described by Bonsai's vision input for the card's role (person, place, outfit,
+  prop, style, first/last frame...) into its empty description, and the prompt is then written
+  from text - no ~1,100 picture tokens and ~18 s with every prompt, and the request stays
+  cache-friendly. The card shows "Describing... 12 s" with Cancel, then "written by Bonsai - edit
+  freely" with Re-describe; errors (e.g. a Bonsai without vision projector) show inline. Text you
+  typed is never overwritten ("Describe with Bonsai" instead, and a late description is offered).
+  Picking several pictures at once adds a reference for each. Setting **Describe pictures
+  automatically** (Settings > Prompt writing and the Write tips; `auto_describe`, default on).
+  Descriptions are cached by picture content and role in `descriptions\` of the config folder.
+- CLI: `bh3 describe <image> [--role ...] [--no-cache] [--json]`, and `bh3 write --spec-file F
+  --describe` fills a form's empty descriptions from its pictures first. MCP: `describe_image`.
+
+- **Run without the Bonsai-demo folder.** The app starts PrismML's `llama-server.exe` itself, with
+  the flags `start_llama_server.ps1` passes for a Bonsai 2 model, from:
+  - model files anywhere on the PC, used in place (the config stores only the paths; a
+    `*mmproj*.gguf` next to the model is found by itself),
+  - downloads: the server build for this PC (release `prism-b10787-73bfe6c`; CUDA 13.3 / 12.4 by
+    the driver's CUDA version, else Vulkan or CPU) from GitHub, and models from Hugging Face (catalog:
+    27B PTQ1_0, 27B PQ2_0, 9B, 4B, 2B with their projectors; or any repo + file, optional token),
+  - an import (copy, or move) of a Bonsai-demo folder's server build, model and projector.
+  Downloads resume (`.part` + HTTP Range), are checked against sha256 before use, and report
+  speed and time left; a full disk, 401/403 (gated repo) and 404 get clear messages.
+- Setup dialog: three ways - **Model files on this PC** (with "Download server build" when no
+  server is known), **Download Bonsai** (sizes and free space first), **Bonsai-demo folder** (plus
+  **Import into the app**).
+- Bonsai workspace: a **Models** area next to the log - what Bonsai starts from, downloads with
+  progress (Cancel / Resume), the server build for this PC, installed models (Set active, Delete
+  with confirmation), the catalog and a Hugging Face form.
+- Settings > Bonsai server: model / projector / server paths, models folder, Hugging Face token,
+  and the launch options GPU layers, image token cap, 4-bit KV cache and extra llama-server
+  arguments (they also reach the Bonsai-demo launcher as `BONSAI_NGL`, `BONSAI_IMAGE_MAX_TOKENS`,
+  `BONSAI_KV4`, and its `@args`).
+- CLI: `bh3 models list | download <id|hf:repo/file> [--mmproj] [--use] | import <dir> [--move] |
+  use <id|file.gguf|none> [--mmproj] [--server] | remove <id>` and `bh3 runtime show | download
+  [--backend]`, all with `--json`; progress on stderr, Ctrl+C keeps the partial download.
+- Before a start from the app's runtime, missing system DLLs of the server build (the Visual C++
+  runtime: VCRUNTIME140, MSVCP140, VCOMP140) are found and named, with Microsoft's download link.
+
+### Changed
+
+- `bh3 status` / `install show` report the app's runtime (`"source": "runtime"`) and name what is
+  missing (no server build, model file not found, Visual C++ runtime).
+- New config fields (`runtime.*`, `gpu_layers`, `image_max_tokens`, `kv_cache_4bit`,
+  `extra_args`); config files of 0.1.0 load unchanged.
+- HTTPS support in the HTTP client (ureq `tls`), plus the `sha2` and `zip` (deflate) crates.
+
 ## [0.1.0] - 2026-10-28
 
 First release: a desktop app, a command line tool and an MCP server that write MiniMax H3 video

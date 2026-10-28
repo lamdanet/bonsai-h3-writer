@@ -43,6 +43,7 @@ The client starts `bh3 mcp` itself; it runs until the client closes its stdin (e
 |---|---|---|
 | `bonsai_status` | - | state (`ready`, `loading`, `starting`, `stopped`, `failed`), URL, model, context, slots, vision, the Bonsai folder, `auto_start`, GPU memory and temperature, other programs on the GPU. Changes nothing |
 | `write_prompt` | `mode` (`r2v` / `f2v`), `request`; optional `duration_s`, `refs`, `first_frame_pinned`, `has_last_frame`, `images` (absolute paths), `thinking`, `temperature`, `max_tokens` (256-16384), `auto_start`, `save_history` | writes, cleans, checks and saves a prompt, like `bh3 write` |
+| `describe_image` | `path` (absolute); optional `role` (`person` default, `same-person`, `place`, `person-and-place`, `outfit`, `prop`, `style`, `first-frame`, `last-frame`, `keyframe`, `storyboard`), `no_cache`, `auto_start` | Bonsai looks at the picture once and writes one paragraph for its role, like `bh3 describe`; the same picture and role comes from the cache without Bonsai. Put the text into `write_prompt`'s request (`Ref 1: <description>`) instead of sending `images` with every prompt. Fails (`failure`) when Bonsai has no vision projector |
 | `fix_prompt` | `fix` or `from_lint: true`; optional `history_id` (default `last`), `thinking`, `temperature`, `max_tokens`, `auto_start`, `save_history` | follow-up fix of a saved prompt, saved as a new entry, like `bh3 fix` |
 | `lint_prompt` | `prompt`; optional `mode`, `duration_s`, `refs`, `first_frame_pinned`, `has_last_frame` | checks any prompt without Bonsai, like `bh3 lint` |
 | `clip_length` | `seconds` | frames, real length (`6.58` for 6 s), suggested most cuts, laptop size limit |
@@ -66,6 +67,9 @@ such as "in her 20s"). A fix keeps the facts its entry was checked with.
   and warnings. `structuredContent`: `prompt`, `mode`, `lint` (`ok`, `score`, `errors`,
   `warnings`, `infos`, `issues[]` with `severity`, `code`, `message`, `line`), `lint_context`,
   `history_id`, `parent_id`, `started_server`, `finish_reason`, `timings`, `warnings`.
+- `describe_image` text: the description. `structuredContent`: `path`, `role`, `description`,
+  `cached`, `model`, `created`, `elapsed_ms`, `timings`, `finish_reason`, `started_server`,
+  `warnings`.
 - The prompt goes into MiniMax H3 unchanged; problems are fixed with `fix_prompt`, not by hand.
 - A failed call is a normal result with `isError: true`: the text says why (with the tool to
   use, e.g. "Start it with start_bonsai."), `structuredContent` is `{"error", "kind"}` with
@@ -76,15 +80,17 @@ such as "in her 20s"). A fix keeps the facts its entry was checked with.
 
 ## Typical flow
 
-1. `write_prompt` with `mode` and a request in plain words (`list_templates` shows the form).
-2. `structuredContent.lint.ok` false: `fix_prompt` with `from_lint: true`, or with `fix` in your
+1. Picture files from the user: `describe_image` once per picture (with its `role`), then use
+   the descriptions as the picture lines of the request.
+2. `write_prompt` with `mode` and a request in plain words (`list_templates` shows the form).
+3. `structuredContent.lint.ok` false: `fix_prompt` with `from_lint: true`, or with `fix` in your
    own words. One round is usually enough; a badly wrong prompt is written again instead.
-3. Give the user `structuredContent.prompt`.
-4. The user renders in ComfyUI next: `stop_bonsai` (only when they want the GPU back).
+4. Give the user `structuredContent.prompt`.
+5. The user renders in ComfyUI next: `stop_bonsai` (only when they want the GPU back).
 
 ## Bonsai and the GPU
 
-- `write_prompt`, `fix_prompt` and `chat` start Bonsai when it is not running and auto-start is
+- `write_prompt`, `describe_image`, `fix_prompt` and `chat` start Bonsai when it is not running and auto-start is
   on (the app's `auto_start`; the `auto_start` argument overrides it for one call). Loading takes
   about a minute; the call waits up to `start_timeout_secs` (300 s).
 - A start is refused while other programs (ComfyUI's `python.exe`?) hold more than

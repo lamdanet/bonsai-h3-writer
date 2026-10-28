@@ -3,8 +3,8 @@
 Write **MiniMax H3** video prompts with your local **Bonsai 27B**, in a Blender-style desktop app
 or from the command line.
 
-Bonsai H3 Writer drives the `llama-server` of your
-[Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) install. You describe a clip in plain
+Bonsai H3 Writer runs Bonsai's `llama-server` itself - from model files on your PC, from a download,
+or from your [Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) install. You describe a clip in plain
 words ("Ref 1: a young woman in a red coat. Place: a rainy street at night. 6 s, one take: she
 turns to the camera and smiles"), and Bonsai turns that into a prompt in the official H3 format,
 ready to paste into ComfyUI. The app replaces Bonsai's web UI for this job: it starts Bonsai when a
@@ -21,6 +21,8 @@ prompt is needed, checks the result, and stops Bonsai again so ComfyUI gets the 
 - [Requirements](#requirements)
 - [Install](#install)
 - [First run](#first-run)
+- [Run without Bonsai-demo](#run-without-bonsai-demo)
+- [New PC without Bonsai-demo](#new-pc-without-bonsai-demo)
 - [Quick start: write a prompt](#quick-start-write-a-prompt)
 - [Why thinking is off by default](#why-thinking-is-off-by-default)
 - [Bonsai and ComfyUI share the GPU](#bonsai-and-comfyui-share-the-gpu)
@@ -44,6 +46,10 @@ prompt is needed, checks the result, and stops Bonsai again so ComfyUI gets the 
   - **f2v** (first-frame video): a first frame (I2VA) or a first and a last frame (FL2VA). The
     prompt starts with the alignment line, then `integrated_multimodal_description`,
     `overall_soundscape` and `non_diegetic_music`.
+- **Describes your reference pictures once.** Pick a picture and Bonsai's vision input writes
+  what it shows for its role (a person, a place, an outfit, the look) into the description, in
+  about 18 s. Prompts are then written from that text: fast, cache-friendly, and you can correct
+  the description. The same picture is never described twice.
 - **Uses the real clip length.** H3 renders 24 fps on a 17k+5 frame grid, so a requested 6 s clip
   is really 6.58 s. Shot timestamps and the FL2VA alignment line use the real length.
 - **Checks every prompt** against the guides: sections and their order, task tags, picture
@@ -69,13 +75,25 @@ prompt is needed, checks the result, and stops Bonsai again so ComfyUI gets the 
 
 Turn a request into a prompt.
 
-- **Left toolbar**: mode (r2v / f2v), request templates (one click fills the request), quick tips.
+- **Left toolbar**: mode (r2v / f2v), request templates (one click fills the request), quick tips
+  and the **Describe pictures automatically** switch.
 - **Request** area with two tabs:
   - *Builder*: the references (role such as person, place, outfit, prop, style or first frame; a
     description; an optional image with a thumbnail and a "send to Bonsai" switch with a token
     warning; reorder and remove; up to 9 in r2v, first and last frame in f2v), the shot (duration
     with the real H3 length, cuts, action), the look (style, camera, place, outfit, people
     without a photo), dialogue lines and notes.
+  - **Pictures are described for you**: pick a picture (click the slot; pick several at once to
+    add a reference for each) and Bonsai looks at it once for the card's role - "Describing...
+    12 s" with Cancel - and writes one paragraph into the empty description, marked *written by
+    Bonsai - edit freely*, with a Re-describe button. Changing the role describes it again while
+    the text is still Bonsai's. Text you typed is never overwritten: such a card has a **Describe
+    with Bonsai** button, and a description that arrives after you typed is offered ("Use it")
+    instead. Descriptions are saved by picture and role (`descriptions\` in the config folder),
+    so the same picture is never described twice. Without a vision projector (mmproj) the card
+    says so and you describe the picture in words. The Write button waits until the pictures are
+    described. "Send to Bonsai" (off by default) still sends the picture itself with every prompt,
+    at ~1,100 tokens and ~18 s each time.
   - *Text*: the request that is sent, editable, with "Rebuild from form" after you edit it.
 - **Write prompt** (Ctrl+Enter) and **Cancel** (Esc), with the current step (starting Bonsai,
   loading the model, writing).
@@ -127,20 +145,28 @@ Everything about the server.
 ### Settings
 
 UI scale (also Ctrl+Plus / Ctrl+Minus), accent colour, monospace prompts, show reasoning, save
-history, default clip duration, server URL, default generation settings for prompts and for chat,
+history, default clip duration, describe pictures automatically, server URL, default generation settings for prompts and for chat,
 the config folder, reset and About.
 
 ## Requirements
 
 - **Windows 10 or 11**, 64-bit.
-- **A working Bonsai-demo folder** ([PrismML-Eng/Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo))
-  with:
-  - `scripts\start_llama_server.ps1`, the official launcher (the app starts Bonsai through it),
-  - a built `llama-server.exe` in `bin\cuda\` (or `bin\hip\`, `bin\vulkan\`, `bin\cpu\`),
-  - a Bonsai 27B model (`.gguf`) under `models\`, plus its `mmproj` file if you want to send
-    images.
+- **Bonsai itself**, one of:
+  - **model files on your PC** - a Bonsai 2 `.gguf` (and its `*mmproj*.gguf` for pictures), used
+    where they are; the app downloads the matching `llama-server` build (see
+    [Run without Bonsai-demo](#run-without-bonsai-demo)),
+  - **a download** from the app (server build + Bonsai 2 27B, about 6.7 GB), or
+  - **a working Bonsai-demo folder** ([PrismML-Eng/Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo))
+    with:
+    - `scripts\start_llama_server.ps1`, the official launcher (the app starts Bonsai through it),
+    - a built `llama-server.exe` in `bin\cuda\` (or `bin\hip\`, `bin\vulkan\`, `bin\cpu\`),
+    - a Bonsai 27B model (`.gguf`) under `models\`, plus its `mmproj` file if you want to send
+      images.
 
-  If Bonsai starts with the demo's own scripts, it works with this app.
+    If Bonsai starts with the demo's own scripts, it works with this app.
+- The `llama-server` build needs the **Microsoft Visual C++ runtime** (2015-2022, x64). Most PCs
+  have it; if not, the app says so and links to Microsoft's
+  [vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 - **An NVIDIA GPU is recommended.** Tested on an RTX 4060 Laptop GPU with 8 GB; Bonsai 27B then
   uses about 7.7 GB of VRAM. Other llama.cpp backends work, more slowly.
 - Windows PowerShell 5.1 (part of Windows) runs the launcher. The GPU card uses `nvidia-smi`, which
@@ -175,7 +201,13 @@ The zip contains:
 
 ## First run
 
-The **Setup** dialog opens on the first start:
+The **Setup** dialog opens on the first start. It offers three ways:
+
+- **Model files on this PC** - pick your `.gguf`; it stays where it is (see
+  [New PC without Bonsai-demo](#new-pc-without-bonsai-demo)).
+- **Download Bonsai** - the server build for your GPU plus Bonsai 2 27B PTQ1_0 and its vision
+  projector (about 6.7 GB), with the total size and the free disk space shown first.
+- **Bonsai-demo folder** - as before:
 
 1. It lists the Bonsai installs it finds (for example `D:\Bonsai-demo`, `C:\Bonsai-demo`,
    `%USERPROFILE%\Bonsai-demo`, `%USERPROFILE%\Documents\Bonsai-demo` or a `Bonsai-demo` folder
@@ -187,15 +219,81 @@ The **Setup** dialog opens on the first start:
 3. Click **Use this folder**.
 
 That's all. From now on the app starts and stops Bonsai itself. To use another folder later, open
-the **Bonsai** workspace and click **Change** under Install.
+the **Bonsai** workspace and click **Change** under Install. **Import into the app** (on the same
+page) copies the folder's `llama-server`, model and projector into the app's own folder (or moves
+them, with "Move instead of copy") - optional: using the folder needs no copy.
+
+## Run without Bonsai-demo
+
+The app can run Bonsai on its own: it starts PrismML's `llama-server.exe` directly with the flags
+the demo's `start_llama_server.ps1` passes for a Bonsai 2 model (`--jinja`, the model card's
+sampling, `-ngl`, `-fa on`, context, `--mmproj`, the image-token cap, the 4-bit KV cache when
+chosen). Where the files come from is up to you, and they can be mixed:
+
+| Piece | From |
+|---|---|
+| Model (`.gguf`) | any file on your PC, used **in place** (nothing is copied) - or downloaded from Hugging Face (the catalog, or any `owner/repo` + file) - or imported from a Bonsai-demo folder |
+| Vision projector (`*mmproj*.gguf`) | found next to the model, picked by hand, or downloaded with the model; without it image input is off |
+| Server (`llama-server.exe`) | downloaded by the app (PrismML's llama.cpp release `prism-b10787-73bfe6c`), any `llama-server.exe` of PrismML's fork on your PC, or a Bonsai-demo folder's `bin\cuda` |
+
+The Bonsai 2 formats (PTQ1_0, PQ2_0) only load in **PrismML's llama.cpp fork**, not in stock
+llama.cpp. The app picks the build like the demo's `setup.ps1`: NVIDIA driver with CUDA 13.3 or
+newer (as `nvidia-smi` reports it) -> the CUDA 13.3 build (~545 MB with the CUDA runtime), 12.4 or
+newer -> CUDA 12.4, no NVIDIA driver -> Vulkan when `vulkaninfo` is on PATH, else CPU (slow). You can
+choose another one.
+
+Downloads go to `%LOCALAPPDATA%\BonsaiH3Writer\runtime\` (`bin\<release>-<backend>\` for server
+builds, `models\<owner>--<repo>\` for models); Settings > Bonsai server > **Models folder** puts the
+models elsewhere, e.g. on another drive. Downloads resume: a cancelled or broken download keeps its
+`.part` file and continues where it stopped. Every file is checked against its sha256 before it is
+used. A gated or private repo needs a Hugging Face token (Settings > Bonsai server, or `HF_TOKEN`).
+
+All of this is in **Bonsai > Models** (the tab next to Log): what Bonsai starts from, the downloads
+with speed and time left (Cancel / Resume), the server build for this PC, the models on this PC
+(**Set active** - applies on the next start, **Restart now** offered - and **Delete**, which asks
+first and only ever deletes files in the app's models folder), the catalog (27B PTQ1_0, 27B PQ2_0,
+9B, 4B, 2B) and a form for any Hugging Face model. Settings > Bonsai server holds the paths and the
+launch options (GPU layers, image tokens, 4-bit KV cache, extra arguments).
+
+From the command line: `bh3 models list | download | import | use | remove` and
+`bh3 runtime show | download` (see [docs/CLI.md](docs/CLI.md#models)).
+
+## New PC without Bonsai-demo
+
+You have `Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf` and
+`Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf` in some folder, and nothing else:
+
+1. Start `bonsai-h3-writer.exe`. The Setup dialog opens on **Model files on this PC**.
+2. Click **Browse...** and pick the model `.gguf`. A `*mmproj*.gguf` in the same folder is found by
+   itself (else pick it with the second **Browse...**; without one, image input is off).
+3. **Server: Not installed** - click **Download server build (CUDA 13.3, 544 MB incl. CUDA
+   runtime)**. The build is picked from `nvidia-smi`; without an NVIDIA driver the dialog says so
+   and offers Vulkan / CPU. A progress bar shows the speed and the time left; Cancel keeps what was
+   downloaded.
+4. When it is done, **Use this model** is enabled: click it. The config now holds the model and
+   projector paths (where they are) and the downloaded server.
+5. Write a prompt: Bonsai starts by itself.
+
+If Windows lacks the Visual C++ runtime the server needs (`VCRUNTIME140.dll`, `MSVCP140.dll`,
+`VCOMP140.DLL`), the dialog and the Bonsai workspace say so before a start and link to
+[vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
+The same from the command line:
+
+```powershell
+bh3 models use "E:\Models\Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf"   # projector found next to it
+bh3 runtime download                                                            # the build for this GPU
+bh3 status                                                                      # says what is still missing
+bh3 write --mode r2v --request "..."                                            # starts Bonsai when needed
+```
 
 ## Quick start: write a prompt
 
 1. If ComfyUI is running, close it: Bonsai needs the GPU. The app warns you when it is still
    holding VRAM.
 2. Open the **Write** workspace and choose **r2v** or **f2v** in the left toolbar.
-3. Describe the clip in the **Builder**: a role and a short description for each reference
-   picture, the duration, the action, the look. Or click a template on the left and fill in the
+3. Describe the clip in the **Builder**: a role and a picture (Bonsai describes it) or a short
+   description for each reference, the duration, the action, the look. Or click a template on the left and fill in the
    `< >` parts in the **Text** tab.
 4. Click **Write prompt** or press **Ctrl+Enter**. If Bonsai is off, the app starts it and waits
    for the model to load; the status bar shows the progress. With thinking off, the prompt is
@@ -210,9 +308,10 @@ the **Bonsai** workspace and click **Change** under Install.
 
 Tips:
 
-- **Describe pictures in words.** Sending an image to Bonsai costs about 1,100 tokens and 18 s per
-  picture on an 8 GB laptop, and a good description works just as well for the prompt. The
-  picture order in the request must match the order of the reference images in ComfyUI.
+- **Pick a picture: Bonsai describes it once** (~18 s) and the prompt is written from that text -
+  edit the description if something is wrong. Sending the picture itself with every prompt costs
+  about 1,100 tokens and 18 s each time on an 8 GB laptop, and a good description works just as
+  well. The picture order in the request must match the order of the reference images in ComfyUI.
 - **Real lengths** used in the prompts:
 
   | Requested | 3 s | 4 s | 5 s | 6 s | 8 s | 10 s | 15 s |
@@ -296,12 +395,16 @@ bh3 fix --last --from-lint
 
 # Check a prompt you already have
 bh3 lint --file p.txt --duration 6 --refs 2
+
+# Let Bonsai describe a reference picture once (cached), for the request's "Ref 1: ..." line
+bh3 describe photo.jpg --role person
 ```
 
 | Commands | What they do |
 |---|---|
 | `status`, `start [--wait]`, `stop`, `restart` | Bonsai server status and control (`stop` frees the GPU for ComfyUI) |
 | `write`, `fix`, `lint` | write a prompt, send a follow-up fix, check any prompt |
+| `describe <IMAGE> --role ROLE` | Bonsai describes a picture once (cached) for its role |
 | `chat` | one message to Bonsai, optionally with an H3 system prompt or images |
 | `templates`, `template <ID>`, `fixes`, `system-prompt`, `guide` | the library texts, including your edits |
 | `history list \| show \| export \| delete` | the saved prompts |
@@ -369,6 +472,11 @@ connects. The tools, their arguments and the setup for other clients are in
 
 ## Where your data is stored
 
+Downloaded server builds and models: `%LOCALAPPDATA%\BonsaiH3Writer\runtime\` (models elsewhere when
+Settings > Bonsai server > Models folder says so). Model files you chose on your PC stay where they
+are.
+
+
 Everything lives in `%APPDATA%\BonsaiH3Writer`
 (`C:\Users\<you>\AppData\Roaming\BonsaiH3Writer`):
 
@@ -378,6 +486,7 @@ Everything lives in `%APPDATA%\BonsaiH3Writer`
 | `library\` | your edited versions of the built-in texts (Reset to built-in removes them) |
 | `history\` | one `<id>.json` per written prompt |
 | `chats\` | the saved Chat conversations |
+| `descriptions\` | Bonsai's picture descriptions, one `<sha256>-<role>.json` per picture and role |
 | `server.log` | Bonsai's console output when the app starts it |
 
 Set the environment variable `BH3_CONFIG_DIR` to use another folder, for example for a portable

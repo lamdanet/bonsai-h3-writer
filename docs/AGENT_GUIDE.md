@@ -15,8 +15,10 @@ hand-write or hand-edit H3 prompts. Full reference: `docs/CLI.md`, or `bh3 <comm
 - Leave thinking **off** (the default). Never use `--thinking high` (or medium / low) on the user's
   8 GB laptop: thinking burned 1,000-3,000 tokens without answering. Off writes a valid prompt in
   10-25 s.
-- Describe the pictures **in words** in the request. `--image` costs ~1,100 tokens and ~18 s per
-  picture and is rarely better.
+- Describe the pictures **in words** in the request. When the user gives a picture file, run
+  `bh3 describe <file> --role person|place|outfit|style|first-frame|... --json` once (~18 s, cached
+  afterwards) and put `.description` into the request as that picture's line. `--image` sends the
+  picture with every prompt (~1,100 tokens and ~18 s each time) and is rarely better.
 - Use `--stop-after` when the user renders in ComfyUI next: it stops Bonsai (frees ~7.7 GB of VRAM)
   if your command started it. A Bonsai that was already running is left alone.
 - Do not run `bh3 stop`, `bh3 restart` or `bh3 start --force` unless the user asks: `stop` ends every
@@ -29,6 +31,7 @@ hand-write or hand-edit H3 prompts. Full reference: `docs/CLI.md`, or `bh3 <comm
 
 ```text
 bh3 status --json                                  # exit 0: ready. 3: not running (write starts it)
+bh3 describe photo.jpg --role person --json        # only for picture files: .description -> "Ref 1: ..."
 bh3 write --mode r2v --request-file req.txt --json --stop-after
   -> .lint.ok true?  done: give the user .prompt
   -> .lint.ok false: bh3 fix --last --from-lint --json --stop-after   (errors + warnings as the fix)
@@ -105,6 +108,7 @@ She says "Good morning."
 |---|---|
 | `status` | is Bonsai ready? install, model, GPU |
 | `write --mode r2v\|f2v --request-file F` | request -> prompt, checked and saved |
+| `describe IMAGE --role ROLE` | a picture file -> one paragraph for its Ref line (cached; needs the vision projector) |
 | `fix --last \| --id ID` + `--fix TEXT \| --from-lint` | follow-up change of a saved prompt |
 | `lint [--file F]` | check any prompt (stdin without `--file`) |
 | `templates`, `template ID`, `fixes [--mode r2v\|f2v]` | request templates and tested fix texts |
@@ -112,14 +116,25 @@ She says "Good morning."
 | `lengths` | requested seconds -> frames, real length, max cuts, laptop size |
 | `chat --message TEXT [--system r2v]` | a free question to Bonsai |
 | `tokens`, `gpu`, `logs`, `config`, `install` | diagnostics and settings |
+| `models list \| use FILE.gguf \| download ID`, `runtime show \| download` | Bonsai without the Bonsai-demo folder: model files in place, server build, downloads |
 | `mcp` | the same functions as MCP tools (see below) |
+
+## When Bonsai is not set up
+
+`bh3 status --json` names what is missing in `install.problems` (exit 3). Without a Bonsai-demo
+folder: `bh3 models use <file.gguf>` (the file stays where it is; a `*mmproj*.gguf` next to it is
+found), then `bh3 runtime download` (the llama-server build for this GPU, ~545 MB for CUDA), then
+write as usual. Do not download models (5-7 GB) unless the user asks for it. Downloads print
+progress on stderr; Ctrl+C keeps the `.part` and the same command continues. A missing Visual C++
+runtime is reported with Microsoft's link - the user has to install it.
 
 ## MCP
 
 `bh3 mcp` is an MCP server on stdin/stdout, so an MCP client calls the writer as native tools
 instead of running commands: `claude mcp add bonsai-h3 -- "<path>\bh3.exe" mcp`. Tools:
-`bonsai_status`, `write_prompt`, `fix_prompt`, `lint_prompt`, `clip_length`, `get_guide`,
-`list_templates`, `list_history`, `get_history_entry`, `start_bonsai`, `stop_bonsai`, `chat`. The
-rules above apply: thinking off, describe the pictures in words, fix with `fix_prompt` (`from_lint:
+`bonsai_status`, `write_prompt`, `describe_image`, `fix_prompt`, `lint_prompt`, `clip_length`,
+`get_guide`, `list_templates`, `list_history`, `get_history_entry`, `start_bonsai`, `stop_bonsai`,
+`chat`. The rules above apply: thinking off, describe the pictures in words (`describe_image` for a
+picture file), fix with `fix_prompt` (`from_lint:
 true` or `fix`), give the user the prompt unchanged, and call `stop_bonsai` only when the user wants
 the GPU back. A failed call is a result with `isError: true` and the reason. See `docs/MCP.md`.

@@ -22,6 +22,7 @@ A compact guide for LLM agents is in [AGENT_GUIDE.md](AGENT_GUIDE.md) (also `bh3
 - [Exit codes](#exit-codes)
 - [Server: status, start, stop, restart](#server-status-start-stop-restart)
 - [write](#write)
+- [describe](#describe)
 - [fix](#fix)
 - [lint](#lint)
 - [chat](#chat)
@@ -31,6 +32,8 @@ A compact guide for LLM agents is in [AGENT_GUIDE.md](AGENT_GUIDE.md) (also `bh3
 - [tokens](#tokens)
 - [config](#config)
 - [install](#install)
+- [models](#models)
+- [runtime](#runtime)
 - [gpu, logs, agent-guide, version](#gpu-logs-agent-guide-version)
 - [mcp](#mcp)
 - [Request spec files](#request-spec-files)
@@ -162,9 +165,11 @@ JSON:
 - `state`: `stopped`, `starting`, `loading` (the model loads), `ready`, `stopping` or `failed`.
 - `message`: why Bonsai is not ready, e.g. "Nothing answers on ..." or "llama-server.exe is
   running (PID ...) but does not answer ...". `null` when ready.
-- `install`: `null` when no folder is set and none was found. `source` is `option`
-  (`--bonsai-dir`), `config` or `detected`. A folder that is not a Bonsai-demo folder has
-  `usable: false` and the reason in `problems`.
+- `install`: `null` when no model, no folder is set and none was found. `source` is `option`
+  (`--bonsai-dir`), `config`, `detected` or `runtime` (the app's own runtime, `runtime.model` set:
+  `root` is the server's folder, `launcher` is `null`). A folder that is not a Bonsai-demo folder has
+  `usable: false` and the reason in `problems`; for the runtime `problems` names what is missing
+  (no llama-server build, a model file not found, the Visual C++ runtime).
 - `props`: `null` unless ready. `gpu`: `null` without `nvidia-smi`.
 - `gpu.busy`: why a start without `--force` would be refused right now (other programs use more
   than `vram_busy_mb` of VRAM; on Windows the per-process memory is usually unknown, `mem_mb: 0`).
@@ -246,7 +251,8 @@ lead-ins, markdown headings, trailing notes), checks it and saves it to the hist
 | `--spec-file FILE` | a request form as JSON, see [Request spec files](#request-spec-files); it also gives the mode and the check facts |
 | `--stdin` | the request from stdin |
 | `--mode r2v\|f2v` | the prompt kind; required unless `--spec-file` gives it (then it overrides the spec's mode) |
-| `--image PATH` | a picture for Bonsai's vision input, repeatable, in Ref order. Costs ~1,100 tokens and ~18 s per picture on the laptop; describing the picture in words is cheaper |
+| `--image PATH` | a picture for Bonsai's vision input, repeatable, in Ref order. Costs ~1,100 tokens and ~18 s per picture with every prompt on the laptop; describing it once with [`bh3 describe`](#describe) and putting the text into the request is cheaper |
+| `--describe` | with `--spec-file`: Bonsai first describes the form's pictures that have no description (see [describe](#describe)) |
 
 Write the request like the templates (`bh3 templates`): one line per picture (`Ref 1: ...` for
 r2v, `Picture 1: ...` for f2v), the length and cuts (`6 s, one take: ...`), the action, camera and
@@ -398,6 +404,65 @@ JSON (`--json`): the fields of the written result, the mode and what the run did
   "save_history": true
 }
 ```
+
+## describe
+
+```text
+bh3 describe <IMAGE> [--role ROLE] [--no-cache] [options]
+```
+
+Bonsai looks at one picture with its vision input (the server needs its `*mmproj*.gguf`) and
+writes **one compact paragraph** of what it shows for the picture's role, in the plain visual words
+the requests use. Use it as the Ref's description: the prompt is then written from text, which is
+faster and cache-friendly (a picture sent with every prompt costs ~1,100 tokens and ~18 s each
+time). It is what the app does when you pick a picture for a reference.
+
+| Option | Meaning |
+|---|---|
+| `IMAGE` | the picture: png, jpg, webp, gif or bmp (bigger than 1024 px: scaled down before sending) |
+| `--role ROLE` | what the picture gives the video, and so what is described [default: `person`]: `person` / `same-person` (age range, face, hair, skin, build, clothing with colours and materials, accessories, pose), `place` (setting, light, time of day, key objects, colours, mood; no people), `person-and-place`, `outfit` (the garments only), `prop` (the object only), `style` (colour grade, light, lens and film look; not the content), `first-frame` / `last-frame` / `keyframe` (exactly what the frame shows: who, pose, framing, camera angle, setting), `storyboard`. Also accepted: `background`, `object`, `look`, `first`, `last`, and `_` instead of `-` |
+| `--no-cache` | ask Bonsai again even when this picture and role were described before |
+| `--no-auto-start`, `--timeout`, `--stop-after`, `--stream`, `--out`, `--copy` | as for `write` |
+
+- Settings of the request: thinking off, temperature 0.2, at most 220 new tokens; a fixed system
+  prompt (cached by llama-server), the role's instruction and the picture.
+- The answer is cleaned: quotes, markdown, list marks and lead-ins such as "This image shows" are
+  removed, so it starts with the subject ("a young woman in her twenties with ..."). A paragraph
+  cut at the token limit loses its unfinished last sentence (a warning says so).
+- **Cache:** `<config folder>\descriptions\<sha256 of the file>-<role>.json`
+  (`{"description", "model", "created"}`). The same picture (same bytes, any file name) and role
+  is answered from it at once, without Bonsai; another role is described again.
+- A server without a vision projector is exit 1: "this Bonsai has no vision projector (mmproj),
+  so it cannot see pictures - describe the picture in words". Bonsai not running and not started:
+  exit 3. A missing file or one that is not a picture: exit 2.
+
+The description goes to stdout. With `--json`:
+
+```json
+{
+  "path": "D:\\refs\\cafe.jpg",
+  "role": "place",
+  "description": "an empty corner cafe with tall windows, light oak tables, rattan chairs and a white marble counter; soft morning daylight, warm beige and green tones, a calm quiet mood.",
+  "cached": false,
+  "model": "Bonsai-2-27B-PTQ1_0.gguf",
+  "created": "2026-10-28 14:03:12",
+  "elapsed_ms": 17950,
+  "timings": { "prompt_n": 1210, "cache_n": 0, "predicted_n": 64, "predicted_per_second": 31.2 },
+  "finish_reason": "stop",
+  "started_server": false,
+  "stopped_server": false,
+  "out_file": null,
+  "copied": false,
+  "warnings": []
+}
+```
+
+`cached: true` has `elapsed_ms: 0`, no `timings` and `finish_reason: "cache"`.
+
+**In a request form:** `bh3 write --spec-file form.json --describe` first describes every used ref
+that has an `image_path`, an empty `description` and `send_image` off (cache first, one Bonsai
+request per new picture), then writes the prompt from the filled-in form. With `--dry-run` only
+cached descriptions are filled in. `--describe` needs `--spec-file`.
 
 ## fix
 
@@ -659,7 +724,13 @@ own copy over yours). A config.json that cannot be read is reported (exit 1), ne
 
 | Key | Values | Default | Meaning |
 |---|---|---|---|
-| `bonsai_dir` | folder, or `none` | not set | the Bonsai-demo folder (`bh3 install set` checks it first) |
+| `bonsai_dir` | folder, or `none` | not set | the Bonsai-demo folder (`bh3 install set` checks it first); not used while `runtime.model` is set |
+| `runtime.model` | file, or `none` | not set | model `.gguf` started directly, where it is (set: no Bonsai-demo folder needed; `bh3 models use`) |
+| `runtime.mmproj` | file, or `none` | not set | its vision projector (none = no image input) |
+| `runtime.server_exe` | file, or `none` | not set | llama-server.exe (unset: the newest build in the app's storage, else `bonsai_dir`'s) |
+| `runtime.dir` | folder, or `none` | `%LOCALAPPDATA%\BonsaiH3Writer\runtime` | storage of downloads and imports |
+| `runtime.models_dir` | folder, or `none` | `<runtime.dir>\models` | where models are downloaded / imported to |
+| `runtime.hf_token` | token, or `none` | not set (`HF_TOKEN` is used) | Hugging Face token for gated / private repos; shown as `***` |
 | `server_url` | URL | `http://127.0.0.1:8080` | llama-server address |
 | `auto_start` | true/false | true | start Bonsai when `write` / `fix` / `chat` need it |
 | `auto_stop_idle_minutes` | number | 10 | the app stops Bonsai after this many idle minutes if it started it (0 = never) |
@@ -667,9 +738,14 @@ own copy over yours). A config.json that cannot be read is reported (exit 1), ne
 | `vram_busy_mb` | number | 1500 | refuse a start (not forced) while other programs use more VRAM (0 = never refuse) |
 | `ctx_size` | number | 0 | context size for the launcher (`BONSAI_CTX`, 0 = launcher default) |
 | `mmproj_cpu` | true/false | false | vision projector in system RAM (`BONSAI_MMPROJ_CPU=1`, frees ~0.9 GB VRAM) |
+| `gpu_layers` | number, or `auto` | auto | layers on the GPU (`BONSAI_NGL`; auto = all, 0 for the CPU build) |
+| `image_max_tokens` | number, or `auto` | auto | image token cap (`BONSAI_IMAGE_MAX_TOKENS`; auto = none with CUDA, 1024 otherwise; 0 = no cap) |
+| `kv_cache_4bit` | true/false | false | q4_0 KV cache (`BONSAI_KV4=1`), ~3.5x less context memory |
+| `extra_args` | text | empty | extra llama-server arguments, last on its command line (quotes group words) |
 | `start_timeout_secs` | number | 300 | how long to wait for the model to load |
 | `default_duration` | 1-120 | 6 | the app's default clip length |
 | `save_history` | true/false | true | save written prompts |
+| `auto_describe` | true/false | true | the app describes a picture picked for a reference once with Bonsai (see [describe](#describe)) |
 | `writer.thinking` | off/low/medium/high | off | prompt writing: thinking |
 | `writer.temperature` | 0-2 | 0.4 | prompt writing: temperature |
 | `writer.max_tokens` | number | 1500 | prompt writing: max new tokens |
@@ -689,9 +765,80 @@ bh3 install set <DIR>     # check DIR and save it as bonsai_dir (exit 1 when it 
 bh3 install show          # the folder in use and what was found in it (exit 1 when it is not usable)
 ```
 
+With `runtime.model` set (see [models](#models)), `install show` describes the app's runtime instead
+(`"source": "runtime"`) and `install set` warns that the runtime takes precedence.
+
 A Bonsai-demo folder has `scripts\start_llama_server.ps1` and/or `bin\<cuda|hip|vulkan|cpu>\llama-server.exe`;
 it is usable with a `llama-server.exe` and a model (`*.gguf`) under `models\`. JSON: `detect` gives
 `{"configured": "...", "installs": [...]}`, `set` and `show` one install object (as in `status`).
+
+## models
+
+Bonsai without the Bonsai-demo folder: the app starts PrismML's `llama-server.exe` directly with
+the flags `start_llama_server.ps1` passes for a Bonsai 2 model. Files you choose stay where they
+are (only their paths are saved); downloads and imports go to the app's storage (`runtime.dir`,
+models to `runtime.models_dir`).
+
+```text
+bh3 models list                                     # models in the app's folder + the one in use, and the catalog
+bh3 models use <ID | FILE.gguf | none> [--mmproj FILE|none] [--server EXE]
+bh3 models download <ID | hf:OWNER/REPO/FILE.gguf> [--mmproj FILE|none] [--use]
+bh3 models import <BONSAI_DEMO_DIR> [--move] [--no-use]
+bh3 models remove <ID> [--force]
+```
+
+- `use` sets `runtime.model` (and `runtime.mmproj`: the `*mmproj*.gguf` next to the model unless
+  `--mmproj` says otherwise; `none` = no image input) and, with `--server`, `runtime.server_exe`.
+  `<ID>` is a model id from `list` (file name without `.gguf`, or a catalog id); any existing
+  `.gguf` path works too and is used in place. `use none` switches back to `bonsai_dir`. Without a
+  known llama-server it warns and names the build `bh3 runtime download` would get. Applies on the
+  next start of Bonsai. JSON: `{"model", "mmproj", "server_exe", "bonsai_dir", "install"}`.
+- `download` takes a catalog id - `27b-ptq1` (default for 8 GB GPUs, 5.5 GB + 600 MB projector),
+  `27b-pq2`, `9b-ptq1`, `4b-ptq1`, `2b-ptq1` - or any Hugging Face file as `hf:owner/repo/file.gguf`
+  (also a pasted `https://huggingface.co/.../resolve/main/...` link), with an optional projector of
+  the same repo (`--mmproj`). Sizes and sha256 come from the catalog or the repo's file list; a
+  file is renamed into place only when its checksum matches. `--use` uses it afterwards.
+- `import` copies the Bonsai-demo folder's llama-server build (`bin\<backend>\llama-server.exe` and
+  its DLLs, no other tools), the model the launcher would pick and its projector, and
+  `scripts\webui-config.json` into the app's storage, then uses them (`--no-use`: only copy).
+  `--move` moves them out of the folder instead. Files already in the app are skipped.
+- `remove` deletes a model of the app's models folder (and its projector when no other model there
+  uses it). Files outside that folder are never deleted (exit 2: not found there). The model in use
+  needs `--force` (the setting is then cleared).
+
+Downloads print progress on stderr (one updated line on a terminal, else a line every 5 s:
+`Downloading <file> (1/2): 42% 2.3 GB of 5.5 GB · 38.0 MB/s · 1m 25s left`). The first Ctrl+C
+cancels (exit 130) and keeps `<file>.part`: the same command continues where it stopped (HTTP
+Range). Errors are clear: `not found (404)`, `access denied (401/403) ... set a Hugging Face token`,
+`not enough disk space ...`, `checksum mismatch ...` (the damaged file is deleted). JSON of
+`download` / `import`: `{"task", "server_exe", "model", "mmproj", "notes", "message", "used",
+"install"}`.
+
+## runtime
+
+```text
+bh3 runtime show                                          # server build in use, builds in the app, the build for this PC, storage
+bh3 runtime download [--backend cuda-13.3|cuda-12.4|vulkan|cpu] [--no-use]
+```
+
+The server builds come from PrismML's llama.cpp fork, release `prism-b10787-73bfe6c` on GitHub
+(the Bonsai 2 formats PTQ1_0 / PQ2_0 do not load in stock llama.cpp). Without `--backend` the build
+is picked like the demo's `setup.ps1`: `nvidia-smi` reports CUDA 13.3 or newer -> `cuda-13.3`
+(release zip + CUDA runtime zip, ~545 MB), 12.4 or newer -> `cuda-12.4` (~675 MB), else `vulkan`
+when `vulkaninfo` is on PATH (CPU + Vulkan zips), else `cpu` (~19 MB, slow); without an NVIDIA
+driver the reason says so. Only `llama-server.exe` and its DLLs are kept, in
+`<runtime.dir>\bin\<release>-<backend>\`, and it is used (`runtime.server_exe`) unless `--no-use`.
+If Windows lacks the Visual C++ runtime the build needs (`VCRUNTIME140.dll`, `MSVCP140.dll`,
+`VCOMP140.DLL`), `download`, `show` and `status` name the missing DLLs and link to
+https://aka.ms/vs/17/release/vc_redist.x64.exe.
+
+New PC without the Bonsai-demo folder:
+
+```powershell
+bh3 models use "E:\Models\Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf"
+bh3 runtime download
+bh3 status            # exit 3 and install.problems while something is missing
+```
 
 ## gpu, logs, agent-guide, version
 
@@ -747,7 +894,8 @@ fields get these defaults:
 |---|---|
 | `mode` | `r2v`, `f2v` |
 | `refs[].role` | `person`, `same_person`, `place`, `person_and_place`, `outfit`, `prop`, `style`, `first_frame`, `last_frame`, `keyframe`, `storyboard` (f2v: Picture 1 is the first frame; `last_frame` marks Picture 2) |
-| `refs[].image_path`, `refs[].send_image` | a picture file and whether to send its pixels to Bonsai (relative paths are relative to the spec file and saved to the history as absolute paths) |
+| `refs[].image_path`, `refs[].send_image` | a picture file and whether to send its pixels to Bonsai with the prompt (relative paths are relative to the spec file and saved to the history as absolute paths); `write --describe` fills an empty `description` from the picture instead |
+| `refs[].auto_description` | set by the app / `--describe`: the description Bonsai wrote (while `description` equals it, it counts as Bonsai's text and may be replaced by a new description) |
 | `duration_s`, `cuts` | requested seconds; 0 cuts = one take |
 | `style` | `film35mm`, `natural`, `documentary`, `commercial`, `noir`, `anime`, `custom` (then `style_custom`) |
 | `camera` | `auto`, `static`, `push_in`, `pull_out`, `tracking`, `arc`, `handheld`, `close_side_view`, `custom` (then `camera_custom`) |
