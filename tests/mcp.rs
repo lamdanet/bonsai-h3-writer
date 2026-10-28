@@ -19,10 +19,11 @@ const DEAD_URL: &str = "http://127.0.0.1:9";
 /// Longest wait for one answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The 12 tools of `tools/list`.
-const TOOLS: [&str; 12] = [
+/// The 13 tools of `tools/list`.
+const TOOLS: [&str; 13] = [
     "bonsai_status",
     "write_prompt",
+    "describe_image",
     "fix_prompt",
     "lint_prompt",
     "clip_length",
@@ -236,6 +237,29 @@ fn mcp_tools_without_bonsai() {
     assert_eq!(write["structuredContent"]["kind"], "unavailable");
     let wrong = server.call("write_prompt", json!({ "mode": "t2v", "request": "x" }));
     assert_eq!((&wrong["isError"], &wrong["structuredContent"]["kind"]), (&json!(true), &json!("usage")), "{wrong}");
+
+    // describe_image: a missing picture is a usage error; a described one comes from the cache
+    // without Bonsai; a new one needs Bonsai.
+    let missing = server.call("describe_image", json!({ "path": server.dir.join("nope.png") }));
+    assert_eq!(missing["structuredContent"]["kind"], "usage", "{missing}");
+    let bad_role = server.call("describe_image", json!({ "path": "x.png", "role": "hat" }));
+    assert_eq!(bad_role["structuredContent"]["kind"], "usage", "{bad_role}");
+    let picture = server.dir.join("cafe.png");
+    std::fs::write(&picture, b"not really a png").unwrap();
+    let key = bh3::describe::DescriptionCache::key(b"not really a png", bh3::request::RefRole::Place);
+    let cache = server.dir.join("descriptions");
+    std::fs::create_dir_all(&cache).unwrap();
+    let saved = json!({ "description": "an empty cafe with tall windows", "model": "m.gguf", "created": "2026-10-28 12:00:00" });
+    std::fs::write(cache.join(format!("{key}.json")), saved.to_string()).unwrap();
+    let hit = server.call("describe_image", json!({ "path": picture, "role": "place" }));
+    assert_eq!(hit["isError"], false, "{hit}");
+    assert_eq!(text(&hit), "an empty cafe with tall windows");
+    assert_eq!(
+        (&hit["structuredContent"]["cached"], &hit["structuredContent"]["role"]),
+        (&json!(true), &json!("place"))
+    );
+    let new = server.call("describe_image", json!({ "path": picture, "role": "place", "no_cache": true }));
+    assert_eq!(new["structuredContent"]["kind"], "unavailable", "{new}");
 
     assert_eq!(server.call("list_history", json!({}))["structuredContent"]["entries"], json!([]));
     assert_eq!(server.call("get_history_entry", json!({ "id": "../x" }))["isError"], true);

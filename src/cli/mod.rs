@@ -18,6 +18,7 @@
 //! `bh3 mcp` offers the same functions as MCP tools on stdin/stdout (`mcp.rs`, `docs/MCP.md`).
 
 mod mcp;
+mod models;
 
 use std::cell::OnceCell;
 use std::ffi::OsString;
@@ -34,13 +35,14 @@ use serde_json::json;
 
 use crate::client::{BonsaiClient, ChatResult, ServerProps, StreamEvent};
 use crate::config::{self, AppConfig};
+use crate::describe::{self, Described, DescriptionCache};
 use crate::gen::{ChatMessage, GenParams, ImageAttachment, Mode, ThinkingMode};
 use crate::gpu::{self, GpuInfo, GpuProcess};
 use crate::history::{self, HistoryEntry};
 use crate::lengths;
 use crate::library::{normalize_text, Library, LibraryItem, Template};
 use crate::lint::{self, LintContext, LintIssue, LintReport, Severity};
-use crate::request::{self, RequestSpec};
+use crate::request::{self, RefRole, RequestSpec};
 use crate::server::{self, BonsaiInstall, ServerManager, ServerState, StartOptions, WaitCancelled};
 use crate::writer::{self, WriteJob, WriteOutcome};
 
@@ -107,6 +109,16 @@ Examples:
 The checker reads the length (\"6 s\"), the pictures (\"Ref 2\" / \"Picture 2\"), \"Ref 1 is the first frame\" and
 \"last frame\" from the request; --duration / --refs / --pinned / --last-frame override that.";
 
+const DESCRIBE_EXAMPLES: &str = "\
+Examples:
+  bh3 describe photo.jpg --role person
+  bh3 describe cafe.png --role place --json
+  bh3 describe frame1.png --role first-frame --no-cache --stop-after
+Bonsai looks at the picture once (~18 s) and writes one paragraph of what it shows for that role. The same picture
+and role comes from the cache next time (descriptions folder in the config folder): no Bonsai needed. Use the text as
+the Ref's description, or let `bh3 write --spec-file form.json --describe` fill in the form's empty descriptions.
+Roles: person, same-person, place, person-and-place, outfit, prop, style, first-frame, last-frame, keyframe, storyboard";
+
 const FIX_EXAMPLES: &str = "\
 Examples:
   bh3 fix --last --fix \"Make the detailed_description longer (about 350 words).\"
@@ -172,6 +184,9 @@ enum Cmd {
     /// Write an H3 prompt from a request (starts Bonsai when needed)
     #[command(after_help = WRITE_EXAMPLES)]
     Write(WriteArgs),
+    /// Describe a picture once with Bonsai's vision input (the text for a reference's description)
+    #[command(after_help = DESCRIBE_EXAMPLES)]
+    Describe(DescribeArgs),
     /// Send a follow-up fix for a saved prompt
     #[command(after_help = FIX_EXAMPLES)]
     Fix(FixArgs),
@@ -203,6 +218,12 @@ enum Cmd {
     /// Find, show or set the Bonsai-demo folder
     #[command(subcommand)]
     Install(InstallCmd),
+    /// Model files: list, download, import from a Bonsai-demo folder, use (in place), remove
+    #[command(subcommand)]
+    Models(models::ModelsCmd),
+    /// The llama-server build the app starts: show, download
+    #[command(subcommand)]
+    Runtime(models::RuntimeCmd),
     /// GPU memory, temperature, load and processes (nvidia-smi)
     Gpu,
     /// The end of the server log
@@ -249,12 +270,31 @@ struct WriteArgs {
     /// Picture for Bonsai's vision input, repeatable in Ref order (~1,100 tokens and ~18 s each)
     #[arg(long = "image", value_name = "PATH")]
     images: Vec<PathBuf>,
+    /// With --spec-file: Bonsai first describes the form's pictures that have an image_path but no
+    /// description (once each, cached; see `bh3 describe`), so the prompt is written from text
+    #[arg(long)]
+    describe: bool,
     #[command(flatten)]
     context: ContextArgs,
     #[command(flatten)]
     gen: GenArgs,
     #[command(flatten)]
     prompt: PromptArgs,
+    #[command(flatten)]
+    run: RunArgs,
+}
+
+#[derive(Debug, Args)]
+struct DescribeArgs {
+    /// The picture (png, jpg, webp, gif or bmp; big ones are scaled down to 1024 px)
+    #[arg(value_name = "IMAGE")]
+    image: PathBuf,
+    /// What the picture gives the video; decides what Bonsai describes (see the roles below)
+    #[arg(long, value_name = "ROLE", default_value = "person", value_parser = parse_role)]
+    role: RefRole,
+    /// Ask Bonsai again even when this picture and role were described before
+    #[arg(long)]
+    no_cache: bool,
     #[command(flatten)]
     run: RunArgs,
 }
@@ -687,6 +727,11 @@ fn parse_refs(text: &str) -> Result<usize, String> {
     parse_number(text, 1usize, request::MAX_R2V_REFS)
 }
 
+/// `--role`: a [`RefRole::id`] such as `person`, `place` or `first-frame`.
+fn parse_role(text: &str) -> Result<RefRole, String> {
+    text.parse::<RefRole>().map_err(|e| e.to_string())
+}
+
 fn parse_temperature(text: &str) -> Result<f32, String> {
     parse_number(text, 0.0f32, 2.0)
 }
@@ -845,6 +890,9 @@ enum Source {
     /// Found automatically ([`server::find_installs`]).
     #[serde(rename = "detected")]
     Detected,
+    /// The app's own runtime (`runtime.model` in the config, no Bonsai-demo folder needed).
+    #[serde(rename = "runtime")]
+    Runtime,
 }
 
 impl Source {
@@ -853,6 +901,7 @@ impl Source {
             Source::Flag => "from --bonsai-dir",
             Source::Config => "from the config",
             Source::Detected => "found automatically",
+            Source::Runtime => "the app's own runtime",
         }
     }
 }
@@ -930,8 +979,13 @@ impl Ctx {
         ServerManager::new(install.unwrap_or_default(), &self.url())
     }
 
-    /// `--bonsai-dir`, else the config's `bonsai_dir`, else the first (usable) install found.
+    /// `--bonsai-dir`, else the app's own runtime when the config has a model, else the config's
+    /// `bonsai_dir`, else the first (usable) install found.
     fn resolve_install(&self) -> Option<Resolved> {
+        if self.bonsai_dir.is_none() && self.config().runtime.is_active() {
+            let install = BonsaiInstall::from_runtime(self.config());
+            return Some(Resolved { source: Source::Runtime, dir: install.root.clone(), detected: Ok(install) });
+        }
         let chosen = match (&self.bonsai_dir, &self.config().bonsai_dir) {
             (Some(dir), _) => Some((Source::Flag, dir.clone())),
             (None, Some(dir)) if !dir.as_os_str().is_empty() => Some((Source::Config, dir.clone())),
@@ -951,8 +1005,9 @@ impl Ctx {
     fn startable_install(&self, what: &str) -> Result<BonsaiInstall, CliError> {
         let Some(resolved) = self.resolve_install() else {
             return Err(CliError::unavailable(format!(
-                "{what}: no Bonsai-demo folder is set and none was found. Set it with `bh3 install set <DIR>` \
-                 (or pass --bonsai-dir)."
+                "{what}: no model and no Bonsai-demo folder is set, and none was found. Use model files with \
+                 `bh3 models use <file.gguf>` (+ `bh3 runtime download` for the server), or set a Bonsai-demo folder \
+                 with `bh3 install set <DIR>` (or pass --bonsai-dir)."
             )));
         };
         let install = resolved
@@ -960,9 +1015,10 @@ impl Ctx {
             .map_err(|e| CliError::unavailable(format!("{what}: {e} (fix it with `bh3 install set <DIR>`)")))?;
         let problems = install.problems();
         if !problems.is_empty() {
+            let from =
+                if install.runtime { "the app's runtime".to_string() } else { install.root.display().to_string() };
             return Err(CliError::unavailable(format!(
-                "{what}: Bonsai cannot be started from {}: {}",
-                install.root.display(),
+                "{what}: Bonsai cannot be started from {from}: {}",
                 problems.join("; ")
             )));
         }
@@ -1215,6 +1271,7 @@ fn dispatch(ctx: &Ctx, command: Cmd) -> CliResult {
         Cmd::Stop => cmd_stop(ctx),
         Cmd::Restart(args) => cmd_start(ctx, &args, true),
         Cmd::Write(args) => cmd_write(ctx, &args),
+        Cmd::Describe(args) => cmd_describe(ctx, &args),
         Cmd::Fix(args) => cmd_fix(ctx, &args),
         Cmd::Lint(args) => cmd_lint(ctx, &args),
         Cmd::Chat(args) => cmd_chat(ctx, &args),
@@ -1228,6 +1285,8 @@ fn dispatch(ctx: &Ctx, command: Cmd) -> CliResult {
         Cmd::Tokens(args) => cmd_tokens(ctx, &args),
         Cmd::Config(cmd) => cmd_config(ctx, &cmd),
         Cmd::Install(cmd) => cmd_install(ctx, &cmd),
+        Cmd::Models(cmd) => models::cmd_models(ctx, &cmd),
+        Cmd::Runtime(cmd) => models::cmd_runtime(ctx, &cmd),
         Cmd::Gpu => cmd_gpu(ctx),
         Cmd::Logs(args) => cmd_logs(ctx, &args),
         Cmd::AgentGuide => cmd_agent_guide(ctx),
@@ -1455,7 +1514,10 @@ fn status_text(status: &StatusJson) -> String {
     }
     match &status.install {
         Some(install) => lines.push(format!("{:<9}{}", "Install", install.line())),
-        None => lines.push(format!("{:<9}no Bonsai-demo folder set or found (bh3 install set <DIR>)", "Install")),
+        None => lines.push(format!(
+            "{:<9}no model and no Bonsai-demo folder set or found (bh3 models use <file.gguf>, or bh3 install set <DIR>)",
+            "Install"
+        )),
     }
     match &status.gpu {
         Some(gpu) => {
@@ -1642,12 +1704,21 @@ struct WriteJson<'a> {
 }
 
 fn cmd_write(ctx: &Ctx, args: &WriteArgs) -> CliResult {
+    if args.describe && args.spec_file.is_none() {
+        return Err(CliError::usage(
+            "--describe needs --spec-file (it fills the form's empty descriptions); for a typed request run              `bh3 describe <picture>` first and put its text into the request",
+        ));
+    }
     let cfg = ctx.config();
     let params = args.gen.apply(cfg.writer_params.clone());
+    let mut session = None;
     let mut job = if let Some(path) = &args.spec_file {
         let mut spec = read_spec(path)?;
         if let Some(mode) = args.mode {
             spec.mode = mode.into();
+        }
+        if args.describe {
+            describe_refs(ctx, &mut spec, &args.run, args.prompt.dry_run, &mut session)?;
         }
         for warning in spec.warnings() {
             ctx.note(format!("note: {warning}"));
@@ -1667,7 +1738,212 @@ fn cmd_write(ctx: &Ctx, args: &WriteArgs) -> CliResult {
     for path in &args.images {
         job.images.push(ImageAttachment::from_file(path).map_err(CliError::from)?);
     }
-    run_prompt_job(ctx, &job, &args.run, &args.prompt, Vec::new())
+    run_prompt_job(ctx, &job, &args.run, &args.prompt, Vec::new(), session)
+}
+
+/// `write --describe`: the used refs with a picture, no description and "send to Bonsai" off get
+/// Bonsai's description (cached ones without Bonsai; with `dry_run` only those). `session` keeps
+/// a Bonsai this started for the write.
+fn describe_refs(
+    ctx: &Ctx,
+    spec: &mut RequestSpec,
+    run: &RunArgs,
+    dry_run: bool,
+    session: &mut Option<Session>,
+) -> Result<(), CliError> {
+    let mode = spec.mode;
+    let used = spec.refs.len().min(request::max_refs(mode));
+    let cache = DescriptionCache::open();
+    for (i, r) in spec.refs.iter_mut().take(used).enumerate() {
+        let Some(path) = r.image_path.clone().filter(|_| !r.send_image && r.description.trim().is_empty()) else {
+            continue;
+        };
+        let name = match mode {
+            Mode::R2v => format!("Ref {}", i + 1),
+            Mode::F2v => format!("Picture {}", i + 1),
+        };
+        let described = if dry_run {
+            match cache.lookup(&path, r.role) {
+                Some(hit) => hit,
+                None => {
+                    ctx.note(format!("{name}: not described yet (--dry-run does not ask Bonsai)."));
+                    continue;
+                }
+            }
+        } else {
+            describe_picture(ctx, &path, r.role, true, run, session)
+                .map_err(|e| CliError { message: format!("{name}: {}", e.message), ..e })?
+        };
+        ctx.note(format!("{name}: {}", described.description));
+        describe::apply(r, &described.description, "");
+    }
+    Ok(())
+}
+
+/// The picture of `describe`, as an absolute path (missing or not a picture: usage error).
+fn check_picture(path: &Path) -> Result<PathBuf, CliError> {
+    if !path.is_file() {
+        return Err(CliError::usage(format!("the picture {} does not exist", path.display())));
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "webp", "gif", "bmp"].contains(&ext.as_str()) {
+        return Err(CliError::usage(format!(
+            "{} is not a picture Bonsai can read: use png, jpg, webp, gif or bmp",
+            path.display()
+        )));
+    }
+    Ok(absolute(path))
+}
+
+/// Describe one picture for `role`: from the cache (with `use_cache`), else by Bonsai (made ready
+/// when needed and kept in `session`); a new description is cached.
+fn describe_picture(
+    ctx: &Ctx,
+    path: &Path,
+    role: RefRole,
+    use_cache: bool,
+    run: &RunArgs,
+    session: &mut Option<Session>,
+) -> Result<Described, CliError> {
+    let path = check_picture(path)?;
+    let cache = DescriptionCache::open();
+    if use_cache {
+        if let Some(hit) = cache.lookup(&path, role) {
+            ctx.note(format!(
+                "{} ({}) was described before: from the cache (--no-cache asks Bonsai again).",
+                file_label(&path),
+                role.id()
+            ));
+            return Ok(hit);
+        }
+    }
+    let image = ImageAttachment::from_file(&path).map_err(|e| CliError::usage(format!("{e:#}")))?;
+    let session = match session {
+        Some(session) => session,
+        None => session.insert(ctx.ensure_ready(run)?),
+    };
+    let props = session
+        .mgr
+        .client()
+        .props()
+        .map_err(|e| CliError::unavailable(format!("cannot read Bonsai's /props: {e:#}")))?;
+    describe::check_vision(&props).map_err(|e| CliError::fail(format!("{e:#}")))?;
+    ctx.note(format!(
+        "Bonsai looks at {} as {} (about {} s)...",
+        file_label(&path),
+        role.label().to_ascii_lowercase(),
+        request::IMAGE_SECONDS
+    ));
+    let result = ctx.generate(session, &describe::messages(image, role), &describe::params(), run.stream)?;
+    let described = describe::finish(&path, role, &result, &props.model_name)
+        .map_err(|e| CliError::generation(format!("{e:#}")))?;
+    if let Err(e) = cache.store(&described) {
+        ctx.warn(format!("the description could not be cached: {e:#}"));
+    }
+    ctx.note(timing_line(&result));
+    Ok(described)
+}
+
+/// The file name of a path (else the whole path).
+fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// `describe --json` (and the facts of the MCP `describe_image` tool).
+#[derive(Debug, Serialize)]
+struct DescribeJson<'a> {
+    path: &'a Path,
+    role: &'static str,
+    description: &'a str,
+    /// From the cache: Bonsai was not asked.
+    cached: bool,
+    model: &'a str,
+    created: &'a str,
+    elapsed_ms: u64,
+    timings: Option<&'a crate::client::Timings>,
+    finish_reason: &'a str,
+    started_server: bool,
+    stopped_server: bool,
+    out_file: Option<&'a Path>,
+    copied: bool,
+    warnings: &'a [String],
+}
+
+/// What `describe` (and MCP `describe_image`) produced.
+struct DescribeRun {
+    described: Described,
+    started: bool,
+    stopped: bool,
+    delivery: Delivery,
+    warnings: Vec<String>,
+    session: Option<Session>,
+}
+
+impl DescribeRun {
+    fn json(&self) -> DescribeJson<'_> {
+        let d = &self.described;
+        DescribeJson {
+            path: &d.path,
+            role: d.role.id(),
+            description: &d.description,
+            cached: d.cached,
+            model: &d.model,
+            created: &d.created,
+            elapsed_ms: d.elapsed_ms,
+            timings: d.timings.as_ref(),
+            finish_reason: &d.finish_reason,
+            started_server: self.started,
+            stopped_server: self.stopped,
+            out_file: self.delivery.out_file.as_deref(),
+            copied: self.delivery.copied,
+            warnings: &self.warnings,
+        }
+    }
+}
+
+/// Describe one picture end to end: cache or Bonsai, stop-after, `--out` / `--copy`.
+fn run_describe(
+    ctx: &Ctx,
+    path: &Path,
+    role: RefRole,
+    use_cache: bool,
+    run: &RunArgs,
+) -> Result<DescribeRun, CliError> {
+    let mut session = None;
+    let described = describe_picture(ctx, path, role, use_cache, run, &mut session);
+    let mut warnings = Vec::new();
+    let stopped = match session.as_mut() {
+        Some(s) => ctx.end_session(s, run.stop_after, &mut warnings),
+        None => false,
+    };
+    let started = session.as_ref().is_some_and(|s| s.started);
+    let described = described.inspect_err(|_| {
+        if let Some(s) = &session {
+            s.keep_running_note(ctx, run.stop_after);
+        }
+    })?;
+    if described.finish_reason == "length" {
+        let text = "Bonsai stopped at the token limit: its cut last sentence was left out".to_string();
+        ctx.warn(&text);
+        warnings.push(text);
+    }
+    let delivery = deliver(&described.description, run);
+    warnings.extend(delivery.problems().cloned());
+    Ok(DescribeRun { described, started, stopped, delivery, warnings, session })
+}
+
+fn cmd_describe(ctx: &Ctx, args: &DescribeArgs) -> CliResult {
+    let done = run_describe(ctx, &args.image, args.role, !args.no_cache, &args.run)?;
+    if ctx.json {
+        print_json(&done.json())?;
+    } else {
+        print_line(&done.described.description);
+    }
+    done.delivery.report(ctx);
+    if let Some(s) = &done.session {
+        s.keep_running_note(ctx, args.run.stop_after);
+    }
+    Ok(if done.delivery.error.is_some() { EXIT_FAIL } else { EXIT_OK })
 }
 
 /// The job for a typed request, with the check facts read from it (`write`, MCP `write_prompt`).
@@ -1683,7 +1959,7 @@ fn text_job(mode: Mode, text: &str, params: GenParams) -> Result<WriteJob, CliEr
 
 fn cmd_fix(ctx: &Ctx, args: &FixArgs) -> CliResult {
     let (job, warnings) = fix_job(ctx, args)?;
-    run_prompt_job(ctx, &job, &args.run, &args.prompt, warnings)
+    run_prompt_job(ctx, &job, &args.run, &args.prompt, warnings, None)
 }
 
 /// The follow-up job of `fix` (and MCP `fix_prompt`): the entry's check facts
@@ -1754,11 +2030,19 @@ fn fix_from_report(report: &LintReport) -> Option<String> {
 }
 
 /// Run a write job end to end and print the result (`warnings`: problems found before the run).
-fn run_prompt_job(ctx: &Ctx, job: &WriteJob, run: &RunArgs, prompt: &PromptArgs, warnings: Vec<String>) -> CliResult {
+/// `session`: a Bonsai already in use (and maybe started) by this command (`write --describe`).
+fn run_prompt_job(
+    ctx: &Ctx,
+    job: &WriteJob,
+    run: &RunArgs,
+    prompt: &PromptArgs,
+    warnings: Vec<String>,
+    session: Option<Session>,
+) -> CliResult {
     if prompt.dry_run {
         return print_dry_run(ctx, job, &writer::build_messages(&Library::load(), job));
     }
-    let done = run_job(ctx, job, run, warnings)?;
+    let done = run_job(ctx, job, run, warnings, session)?;
     let outcome = &done.outcome;
     if ctx.json {
         print_json(&WriteJson {
@@ -1802,9 +2086,19 @@ struct JobRun {
 
 /// Run a write job: server, request, cleanup + check + history, stop-after, `--out` / `--copy`.
 /// Progress goes to stderr only (the MCP server uses it too); `warnings` start the warning list.
-fn run_job(ctx: &Ctx, job: &WriteJob, run: &RunArgs, mut warnings: Vec<String>) -> Result<JobRun, CliError> {
+/// `session`: a Bonsai this command already uses (else it is made ready here).
+fn run_job(
+    ctx: &Ctx,
+    job: &WriteJob,
+    run: &RunArgs,
+    mut warnings: Vec<String>,
+    session: Option<Session>,
+) -> Result<JobRun, CliError> {
     let messages = writer::build_messages(&Library::load(), job);
-    let mut session = ctx.ensure_ready(run)?;
+    let mut session = match session {
+        Some(session) => session,
+        None => ctx.ensure_ready(run)?,
+    };
     ctx.note(job_line(job));
     if job.params.thinking != ThinkingMode::Off {
         ctx.note(format!(
@@ -2700,8 +2994,14 @@ fn cmd_tokens(ctx: &Ctx, args: &TokensArgs) -> CliResult {
 // ---------------------------------------------------------------------------------------------
 
 /// Settings `config get` / `config set` know, in display order.
-const CONFIG_KEYS: [&str; 25] = [
+const CONFIG_KEYS: [&str; 36] = [
     "bonsai_dir",
+    "runtime.model",
+    "runtime.mmproj",
+    "runtime.server_exe",
+    "runtime.dir",
+    "runtime.models_dir",
+    "runtime.hf_token",
     "server_url",
     "auto_start",
     "auto_stop_idle_minutes",
@@ -2709,9 +3009,14 @@ const CONFIG_KEYS: [&str; 25] = [
     "vram_busy_mb",
     "ctx_size",
     "mmproj_cpu",
+    "gpu_layers",
+    "image_max_tokens",
+    "kv_cache_4bit",
+    "extra_args",
     "start_timeout_secs",
     "default_duration",
     "save_history",
+    "auto_describe",
     "writer.thinking",
     "writer.temperature",
     "writer.max_tokens",
@@ -2739,6 +3044,12 @@ enum ConfigValue {
     Real(f32),
     Seed(Option<i64>),
     Thinking(ThinkingMode),
+    /// A number or `auto` (unset).
+    Auto(Option<u32>),
+    /// Free text (may be empty or contain spaces).
+    Args(String),
+    /// Shown as `***` when set.
+    Secret(Option<String>),
 }
 
 impl ConfigValue {
@@ -2753,6 +3064,9 @@ impl ConfigValue {
             ConfigValue::Real(x) => fmt_num(*x),
             ConfigValue::Seed(s) => s.map_or_else(|| "none".to_string(), |s| s.to_string()),
             ConfigValue::Thinking(t) => t.to_string(),
+            ConfigValue::Auto(n) => n.map_or_else(|| "auto".to_string(), |n| n.to_string()),
+            ConfigValue::Args(s) => s.clone(),
+            ConfigValue::Secret(s) => s.as_ref().map_or_else(|| "none".to_string(), |_| "***".to_string()),
         }
     }
 
@@ -2766,6 +3080,9 @@ impl ConfigValue {
             ConfigValue::Real(x) => json!(round3(*x)),
             ConfigValue::Seed(s) => json!(s),
             ConfigValue::Thinking(t) => json!(t),
+            ConfigValue::Auto(n) => json!(n),
+            ConfigValue::Args(s) => json!(s),
+            ConfigValue::Secret(s) => json!(s.as_ref().map(|_| "***")),
         }
     }
 }
@@ -2787,6 +3104,19 @@ fn unknown_key(key: &str) -> CliError {
 
 fn config_get(cfg: &AppConfig, key: &str) -> Result<(String, ConfigValue), CliError> {
     let key = normalize_key(key);
+    if let Some(field) = key.strip_prefix("runtime.") {
+        let rt = &cfg.runtime;
+        let value = match field {
+            "model" => ConfigValue::Path(rt.model.clone()),
+            "mmproj" => ConfigValue::Path(rt.mmproj.clone()),
+            "server_exe" => ConfigValue::Path(rt.server_exe.clone()),
+            "dir" => ConfigValue::Path(rt.dir.clone()),
+            "models_dir" => ConfigValue::Path(rt.models_dir.clone()),
+            "hf_token" => ConfigValue::Secret(rt.hf_token.clone()),
+            _ => return Err(unknown_key(&key)),
+        };
+        return Ok((key, value));
+    }
     if let Some((group, field)) = key.split_once('.') {
         let params = match group {
             "writer" => &cfg.writer_params,
@@ -2814,9 +3144,14 @@ fn config_get(cfg: &AppConfig, key: &str) -> Result<(String, ConfigValue), CliEr
         "vram_busy_mb" => ConfigValue::Count(cfg.vram_busy_mb),
         "ctx_size" => ConfigValue::Count(cfg.ctx_size),
         "mmproj_cpu" => ConfigValue::Bool(cfg.mmproj_cpu),
+        "gpu_layers" => ConfigValue::Auto(cfg.gpu_layers),
+        "image_max_tokens" => ConfigValue::Auto(cfg.image_max_tokens),
+        "kv_cache_4bit" => ConfigValue::Bool(cfg.kv_cache_4bit),
+        "extra_args" => ConfigValue::Args(cfg.extra_args.clone()),
         "start_timeout_secs" => ConfigValue::Count(cfg.start_timeout_secs),
         "default_duration" => ConfigValue::Count(cfg.default_duration),
         "save_history" => ConfigValue::Bool(cfg.save_history),
+        "auto_describe" => ConfigValue::Bool(cfg.auto_describe),
         _ => return Err(unknown_key(&key)),
     };
     Ok((key, value))
@@ -2861,7 +3196,31 @@ fn config_set(cfg: &mut AppConfig, key: &str, value: &str) -> Result<String, Cli
         ConfigValue::Thinking(_) => ConfigValue::Thinking(
             ThinkingMode::from_str(raw).map_err(|_| bad("a thinking level (off, low, medium, high)"))?,
         ),
+        ConfigValue::Auto(_) => match raw.to_ascii_lowercase().as_str() {
+            "" | "auto" | "none" | "default" => ConfigValue::Auto(None),
+            _ => ConfigValue::Auto(Some(parse_number(raw, 0u32, 1_000_000).map_err(range_error)?)),
+        },
+        ConfigValue::Args(_) => ConfigValue::Args(raw.to_string()),
+        ConfigValue::Secret(_) => match raw.to_ascii_lowercase().as_str() {
+            "" | "none" | "null" => ConfigValue::Secret(None),
+            // The masked form leaves the token as it is.
+            "***" => ConfigValue::Secret(cfg.runtime.hf_token.clone()),
+            _ => ConfigValue::Secret(Some(raw.to_string())),
+        },
     };
+    if let Some(field) = key.strip_prefix("runtime.") {
+        let rt = &mut cfg.runtime;
+        match (field, parsed) {
+            ("model", ConfigValue::Path(p)) => rt.model = p,
+            ("mmproj", ConfigValue::Path(p)) => rt.mmproj = p,
+            ("server_exe", ConfigValue::Path(p)) => rt.server_exe = p,
+            ("dir", ConfigValue::Path(p)) => rt.dir = p,
+            ("models_dir", ConfigValue::Path(p)) => rt.models_dir = p,
+            ("hf_token", ConfigValue::Secret(t)) => rt.hf_token = t,
+            _ => return Err(unknown_key(&key)),
+        }
+        return Ok(key);
+    }
     if let Some((group, field)) = key.split_once('.') {
         let params = if group == "writer" { &mut cfg.writer_params } else { &mut cfg.chat_params };
         match (field, parsed) {
@@ -2885,9 +3244,14 @@ fn config_set(cfg: &mut AppConfig, key: &str, value: &str) -> Result<String, Cli
         ("vram_busy_mb", ConfigValue::Count(n)) => cfg.vram_busy_mb = n,
         ("ctx_size", ConfigValue::Count(n)) => cfg.ctx_size = n,
         ("mmproj_cpu", ConfigValue::Bool(b)) => cfg.mmproj_cpu = b,
+        ("gpu_layers", ConfigValue::Auto(n)) => cfg.gpu_layers = n,
+        ("image_max_tokens", ConfigValue::Auto(n)) => cfg.image_max_tokens = n,
+        ("kv_cache_4bit", ConfigValue::Bool(b)) => cfg.kv_cache_4bit = b,
+        ("extra_args", ConfigValue::Args(s)) => cfg.extra_args = s,
         ("start_timeout_secs", ConfigValue::Count(n)) => cfg.start_timeout_secs = n,
         ("default_duration", ConfigValue::Count(n)) => cfg.default_duration = n,
         ("save_history", ConfigValue::Bool(b)) => cfg.save_history = b,
+        ("auto_describe", ConfigValue::Bool(b)) => cfg.auto_describe = b,
         _ => return Err(unknown_key(&key)),
     }
     Ok(key)
@@ -2907,8 +3271,12 @@ fn load_config_strict() -> Result<AppConfig, CliError> {
 fn cmd_config(ctx: &Ctx, cmd: &ConfigCmd) -> CliResult {
     match cmd {
         ConfigCmd::Show => {
-            let cfg = load_config_strict()?;
+            let mut cfg = load_config_strict()?;
             if ctx.json {
+                // The token is not printed.
+                if cfg.runtime.hf_token.is_some() {
+                    cfg.runtime.hf_token = Some("***".to_string());
+                }
                 print_json(&cfg)?;
                 return Ok(EXIT_OK);
             }
@@ -2916,6 +3284,9 @@ fn cmd_config(ctx: &Ctx, cmd: &ConfigCmd) -> CliResult {
             for key in CONFIG_KEYS {
                 let (key, value) = config_get(&cfg, key)?;
                 lines.push(format!("{key:<23} = {}", value.text()));
+                if key == "bonsai_dir" && cfg.runtime.is_active() {
+                    lines.push(format!("{:<23}   (not used while runtime.model is set)", ""));
+                }
             }
             print_line(&lines.join("\n"));
             ctx.note(format!(
@@ -3007,6 +3378,12 @@ fn cmd_install(ctx: &Ctx, cmd: &InstallCmd) -> CliResult {
                 print_json(&InstallJson::of(&install, Some(Source::Config)))?;
             } else {
                 print_line(&format!("{}\nSaved as the Bonsai folder.", install.summary()));
+            }
+            if cfg.runtime.is_active() {
+                ctx.warn(
+                    "the app's own runtime (runtime.model) is set and is used instead of this folder - \
+                     `bh3 models use none` switches back to the folder",
+                );
             }
             for problem in install.problems() {
                 ctx.warn(problem);

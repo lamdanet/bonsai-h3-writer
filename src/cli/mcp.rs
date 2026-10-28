@@ -41,7 +41,9 @@ const MAX_LIST_LIMIT: u64 = 200;
 /// `initialize` instructions for the agent.
 const INSTRUCTIONS: &str = "Bonsai H3 Writer writes MiniMax H3 video prompts with the user's local Bonsai 27B LLM \
 (llama-server on this PC). write_prompt starts Bonsai when it is needed (loading the model takes about a minute) and \
-returns the prompt plus a check report against the official H3 format. Fix problems with fix_prompt (from_lint: true, \
+returns the prompt plus a check report against the official H3 format. For a picture the user gives, call \
+describe_image once (Bonsai looks at it, about 18 s, cached afterwards) and put its text into the request as the \
+picture's description instead of sending the picture with every prompt. Fix problems with fix_prompt (from_lint: true, \
 or your own words in fix) instead of editing the prompt yourself, and give the user the final prompt unchanged: it is \
 pasted into MiniMax H3 as is. Leave thinking \"off\", the tested default. Bonsai keeps running after a call; \
 stop_bonsai frees the 8 GB GPU for ComfyUI, and it also stops a Bonsai the user started.";
@@ -672,7 +674,8 @@ fn tools() -> Vec<Tool> {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Picture files (absolute paths) for Bonsai's vision input, in Ref order; about \
-                                    1,100 tokens and 18 s each - describing the pictures in words is usually enough"
+                                    1,100 tokens and 18 s each with every prompt - describe_image once and the \
+                                    description in the request is usually enough"
                 },
                 "thinking": thinking(),
                 "temperature": temperature("0.4"),
@@ -685,6 +688,34 @@ fn tools() -> Vec<Tool> {
             destructive: false,
             idempotent: false,
             run: tool_write,
+        },
+        Tool {
+            name: "describe_image",
+            title: "Describe a picture",
+            description: "Bonsai looks at one picture with its vision input and writes one compact paragraph of \
+                          what it shows for the picture's role (a person: age range, hair, clothing...; a place: \
+                          setting, light, objects; style: grade, light, lens; first-frame: framing, pose, camera \
+                          angle). Use the text as the picture's description in write_prompt's request (\"Ref 1: \
+                          <description>\"), so prompts are written from text: faster and cheaper than sending the \
+                          picture each time. The same picture and role comes from the cache (no Bonsai needed). \
+                          Takes about 18 s; starts Bonsai when needed. Fails when Bonsai has no vision projector.",
+            properties: json!({
+                "path": string("The picture file (absolute path; png, jpg, webp, gif or bmp)"),
+                "role": choice(
+                    &[
+                        "person", "same-person", "place", "person-and-place", "outfit", "prop", "style",
+                        "first-frame", "last-frame", "keyframe", "storyboard",
+                    ],
+                    "What the picture gives the video; decides what is described [default: person]"
+                ),
+                "no_cache": boolean("Ask Bonsai again even when this picture and role were described before [default: false]"),
+                "auto_start": auto_start(),
+            }),
+            required: &["path"],
+            read_only: false,
+            destructive: false,
+            idempotent: true,
+            run: tool_describe,
         },
         Tool {
             name: "fix_prompt",
@@ -961,8 +992,29 @@ fn tool_write(ctx: &mut Ctx, args: &ToolArgs<'_>) -> Result<ToolOutput, CliError
     for path in images {
         job.images.push(ImageAttachment::from_file(Path::new(path)).map_err(CliError::from)?);
     }
-    let done = run_job(ctx, &job, &RunArgs::default(), Vec::new())?;
+    let done = run_job(ctx, &job, &RunArgs::default(), Vec::new(), None)?;
     Ok(prompt_output(&job, &done))
+}
+
+fn tool_describe(ctx: &mut Ctx, args: &ToolArgs<'_>) -> Result<ToolOutput, CliError> {
+    let path = PathBuf::from(args.text("path")?.unwrap_or_default().trim());
+    let role = match args.text("role")? {
+        None => RefRole::Person,
+        Some(text) => {
+            text.parse().map_err(|_| args.bad("role", "a role such as \"person\", \"place\" or \"first-frame\""))?
+        }
+    };
+    let use_cache = !args.flag("no_cache")?.unwrap_or(false);
+    ctx.auto_start = args.flag("auto_start")?;
+    let done = run_describe(ctx, &path, role, use_cache, &RunArgs::default())?;
+    let warnings: Vec<String> = done.warnings.iter().map(|w| tool_text(w)).collect();
+    let mut text = done.described.description.clone();
+    for warning in &warnings {
+        text.push_str(&format!("\n\nWarning: {warning}"));
+    }
+    let mut data = value_of(&done.json());
+    data["warnings"] = json!(warnings);
+    Ok(ToolOutput::ok(text, data))
 }
 
 fn tool_fix(ctx: &mut Ctx, args: &ToolArgs<'_>) -> Result<ToolOutput, CliError> {
@@ -992,7 +1044,7 @@ fn tool_fix(ctx: &mut Ctx, args: &ToolArgs<'_>) -> Result<ToolOutput, CliError> 
     if let Some(save) = save_history {
         job.save_history = save;
     }
-    let done = run_job(ctx, &job, &fix_args.run, warnings)?;
+    let done = run_job(ctx, &job, &fix_args.run, warnings, None)?;
     Ok(prompt_output(&job, &done))
 }
 
@@ -1309,7 +1361,7 @@ mod tests {
         assert_eq!(ids, [&json!(1), &json!("b")]);
         assert_eq!(reply(&server, r#"[{"jsonrpc":"2.0","method":"notifications/initialized"}]"#), None);
         let list = reply(&server, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"cursor":"x"}}"#);
-        assert_eq!(list.unwrap()["result"]["tools"].as_array().map(Vec::len), Some(12));
+        assert_eq!(list.unwrap()["result"]["tools"].as_array().map(Vec::len), Some(13));
     }
 
     #[test]
@@ -1318,7 +1370,8 @@ mod tests {
         let mut names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 12, "{names:?}");
+        assert_eq!(names.len(), 13, "{names:?}");
+        assert!(names.contains(&"describe_image"), "{names:?}");
         for tool in &tools {
             let definition = tool.definition();
             let schema = &definition["inputSchema"];

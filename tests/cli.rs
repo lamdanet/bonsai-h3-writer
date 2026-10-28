@@ -747,6 +747,84 @@ fn write_dry_run_shows_the_request_and_the_check_facts() {
 }
 
 #[test]
+fn describe_uses_the_cache_and_checks_its_arguments() {
+    let dir = ConfigDir::new("describe");
+    let picture = dir.path().join("cafe.png");
+    std::fs::write(&picture, b"cafe picture bytes").unwrap();
+    let pic = picture.to_str().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "x").unwrap();
+    let missing = dir.path().join("missing.png");
+    for args in [
+        vec!["describe"],
+        vec!["describe", pic, "--role", "hat"],
+        vec!["--url", DEAD_URL, "describe", missing.to_str().unwrap()],
+        vec!["--url", DEAD_URL, "describe", notes.to_str().unwrap()],
+        vec!["--url", DEAD_URL, "write", "--mode", "r2v", "--request", "x", "--describe"],
+    ] {
+        let run = dir.run(&args);
+        assert_eq!(
+            run.code, 2,
+            "{args:?}
+stdout:
+{}
+stderr:
+{}",
+            run.stdout, run.stderr
+        );
+    }
+    // Not described yet: Bonsai is needed (and not running).
+    let run = dir.run(&["--url", DEAD_URL, "describe", pic, "--role", "place", "--json"]);
+    run.expect(3);
+    assert_eq!(run.json()["kind"], "unavailable");
+
+    // Described before (same bytes and role): from the cache, no Bonsai.
+    let key = bh3::describe::DescriptionCache::key(b"cafe picture bytes", bh3::request::RefRole::Place);
+    let cache = dir.path().join("descriptions");
+    std::fs::create_dir_all(&cache).unwrap();
+    let saved = json!({ "description": "an empty sunlit cafe with tall windows", "model": "m.gguf", "created": "2026-10-28 12:00:00" });
+    std::fs::write(cache.join(format!("{key}.json")), saved.to_string()).unwrap();
+    let run = dir.run(&["--url", DEAD_URL, "describe", pic, "--role", "background", "--json"]);
+    run.expect(0);
+    let json = run.json();
+    assert_eq!(json["description"], "an empty sunlit cafe with tall windows");
+    assert_eq!(
+        (&json["cached"], &json["role"], &json["started_server"]),
+        (&json!(true), &json!("place"), &json!(false))
+    );
+    let run = dir.run(&["--url", DEAD_URL, "describe", pic, "--role", "place"]);
+    run.expect(0);
+    assert_eq!(run.stdout.trim(), "an empty sunlit cafe with tall windows");
+    // Another role, or --no-cache: Bonsai is asked.
+    dir.run(&["--url", DEAD_URL, "describe", pic, "--role", "person"]).expect(3);
+    dir.run(&["--url", DEAD_URL, "describe", pic, "--role", "place", "--no-cache"]).expect(3);
+
+    // write --describe fills the form's empty descriptions (here from the cache, so --dry-run shows it).
+    let spec = dir.path().join("form.json");
+    let form = json!({
+        "mode": "r2v",
+        "refs": [{ "role": "place", "image_path": "cafe.png" }, { "description": "a young woman", "image_path": "cafe.png" }],
+        "duration_s": 6,
+        "action": "she sits down"
+    });
+    std::fs::write(&spec, form.to_string()).unwrap();
+    let dry = dir.run(&[
+        "--url",
+        DEAD_URL,
+        "write",
+        "--spec-file",
+        spec.to_str().unwrap(),
+        "--describe",
+        "--dry-run",
+        "--json",
+    ]);
+    dry.expect(0);
+    let request = dry.json()["request"].as_str().unwrap().to_string();
+    assert!(request.starts_with("Ref 1: an empty sunlit cafe with tall windows (place)."), "{request}");
+    assert!(request.contains("Ref 2: a young woman (person)."), "typed text is kept: {request}");
+}
+
+#[test]
 fn starting_without_a_bonsai_folder_exits_3() {
     let dir = ConfigDir::new("no-folder");
     let empty = dir.path().join("not-bonsai");
@@ -767,6 +845,62 @@ fn starting_without_a_bonsai_folder_exits_3() {
     ]);
     run.expect(3);
     assert!(run.json()["error"].as_str().unwrap().contains("not a Bonsai-demo folder"), "{}", run.stdout);
+}
+
+/// The new-PC flow without a Bonsai-demo folder: `models use` keeps the files where they are and
+/// finds the projector next to the model; `status` and `runtime show` name the missing server;
+/// `--server` completes it; `remove` never deletes a file outside the app's models folder;
+/// `models use none` goes back to bonsai_dir. Offline: nothing is downloaded or started.
+#[test]
+fn models_use_in_place_and_status_names_what_is_missing() {
+    let dir = ConfigDir::new("models");
+    let files = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&files).unwrap();
+    let model = files.join("Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf");
+    let mmproj = files.join("Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf");
+    std::fs::write(&model, vec![1u8; 4096]).unwrap();
+    std::fs::write(&mmproj, vec![2u8; 512]).unwrap();
+    let model_arg = model.to_str().unwrap();
+
+    let used = dir.run(&["models", "use", model_arg, "--json"]);
+    let used = used.expect(0).json();
+    assert_eq!(used["model"], json!(model));
+    assert_eq!(used["mmproj"], json!(mmproj), "found next to the model");
+    assert_eq!(used["install"]["source"], "runtime");
+    assert_eq!(used["install"]["usable"], false);
+    let problems = used["install"]["problems"].to_string();
+    assert!(problems.contains("No llama-server build"), "{problems}");
+    assert!(model.is_file() && mmproj.is_file(), "nothing moved");
+
+    let list = dir.run(&["models", "list", "--json"]).expect(0).json();
+    let installed = list["installed"].as_array().unwrap();
+    assert_eq!(installed.len(), 1, "{list}");
+    assert_eq!((installed[0]["active"].clone(), installed[0]["managed"].clone()), (json!(true), json!(false)));
+    assert_eq!(list["catalog"].as_array().unwrap().len(), 5);
+
+    let status = dir.run(&["--url", DEAD_URL, "status", "--json"]);
+    let status = status.expect(3).json();
+    assert!(status["install"]["problems"].to_string().contains("llama-server"), "{status}");
+    let shown = dir.run(&["runtime", "show", "--json"]).expect(0).json();
+    assert_eq!(shown["active"], true);
+    assert!(shown["recommended"]["backend"].is_string(), "{shown}");
+
+    // A llama-server.exe anywhere on the PC completes it (not started here).
+    let exe = files.join("llama-server.exe");
+    std::fs::write(&exe, b"not a real program").unwrap();
+    let full = dir.run(&["models", "use", model_arg, "--server", exe.to_str().unwrap(), "--json"]).expect(0).json();
+    assert_eq!(full["install"]["usable"], true, "{full}");
+    assert_eq!(full["server_exe"], json!(exe));
+
+    // Not in the app's models folder: never deleted.
+    let removed = dir.run(&["models", "remove", "Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0"]);
+    removed.expect(2);
+    assert!(model.is_file());
+
+    dir.run(&["models", "use", "none", "--json"]).expect(0);
+    assert_eq!(dir.run(&["config", "get", "runtime.model"]).expect(0).stdout.trim(), "none");
+    assert_eq!(dir.run(&["models", "download", "no-such-model"]).code, 2);
+    assert_eq!(dir.run(&["runtime", "download", "--backend", "rocm"]).code, 2);
 }
 
 // ---------------------------------------------------------------------------------------------
