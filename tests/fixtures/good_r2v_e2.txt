@@ -1,0 +1,19 @@
+subject_definitions:
+<Subject 1> is the woman in <Picture 1>, her character reference sheet: a young woman in her mid-twenties with long straight dark-brown hair in a low ponytail, wearing a crisp white button-up blouse, a black knee-length pencil skirt and black heels.
+<Subject 2> is the man in <Picture 2>, his character reference sheet: a man in his late thirties with short brown hair and light stubble, wearing a blue denim jacket over a navy crew-neck T-shirt, blue jeans and brown leather boots.
+
+summary:
+[reference generation] The target video shows <Subject 2> greeting <Subject 1> on a park path in two shots: a medium two-shot of the greeting, then a cut to a close-up of <Subject 1> answering.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - her face, ponytail, white blouse and black pencil skirt are retained.
+<Subject 2> (appears in [Shot 1]): fully_preserved - his face, short brown hair, stubble, denim jacket, navy T-shirt and jeans are retained.
+
+detailed_description:
+The target video is a photorealistic, cinematic live-action scene in a green city park on a clear afternoon, with soft sunlight and gentle colours.
+[Shot 1] A medium two-shot frames <Subject 2>, the man from <Picture 2>, standing on a gravel park path on the left, and <Subject 1>, the woman from <Picture 1>, walking in from the right past a wooden bench and tall trees. The camera holds a static shot. He raises his right hand in a friendly wave, and the man with a warm, relaxed baritone voice (S1) says: <d>[English] Hey, you made it.</d>
+[Shot 2] At 00:01.500, the camera cuts to a close-up of <Subject 1> in her white blouse, the park softly out of focus behind her. She tilts her head with a bright smile, and the young woman with a clear, cheerful voice (S2) replies: <d>[English] Of course I did.</d>
+
+overall_soundscape: Birdsong and leaves rustling in a light breeze, gravel crunching under her shoes, and distant children playing.
+
+non_diegetic_music: N/A

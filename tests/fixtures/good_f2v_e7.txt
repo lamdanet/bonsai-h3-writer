@@ -1,0 +1,7 @@
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+integrated_multimodal_description: [Shot 1] Live-action, cinematic, the shot opens on <Picture 1>: a man in his early fifties with short grey-streaked dark hair, black rectangular glasses and light stubble, wearing a charcoal three-piece suit with a white shirt, a dark tie and black leather shoes sits at an oak table in the middle of a sunlit corner cafe, with the white marble counter, glass pendant lamps and rattan chairs behind him and tall windows to his left. His face, glasses, suit and the cafe layout stay exactly as in <Picture 1>. He checks his wristwatch, closes the black leather folio on the table, stands up, buttons his jacket with one hand and picks up the folio. The camera pans right with small amplitude at slow speed as he walks past the counter toward the door, nodding once to someone off-screen.
+
+overall_soundscape: Quiet cafe room tone with a faint espresso-machine hiss, the scrape of his chair, the soft snap of the folio closing and his footsteps on the terrazzo floor.
+
+non_diegetic_music: N/A

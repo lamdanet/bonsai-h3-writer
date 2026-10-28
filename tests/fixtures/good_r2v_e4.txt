@@ -1,0 +1,18 @@
+subject_definitions:
+<Subject 1> is the man whose appearance comes from <Picture 1>, his character reference sheet, and <Picture 2>, a photo of him in a cafe: a man in his early fifties with short grey-streaked dark hair, black rectangular glasses and light stubble, wearing a charcoal three-piece suit with a white shirt, a dark tie and black leather shoes.
+<Subject 2> is the cafe environment in <Picture 2>: the sunlit corner cafe, with tall windows on the left, light oak tables, rattan chairs, a terrazzo floor, a long white marble counter with a chrome espresso machine, glass pendant lamps and green potted plants.
+
+summary:
+[reference generation] The target video shows <Subject 1> reading a menu and sipping coffee at a window table in <Subject 2>, which is now seen in the evening with rain on the windows.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - his face, glasses, grey-streaked hair and charcoal three-piece suit are retained from both pictures.
+<Subject 2> (appears in [Shot 1]): partially_preserved - the window wall, oak tables, rattan chairs and marble counter keep their layout, but the time changes to evening, the pendant lamps are lit and rain streaks the windows.
+
+detailed_description:
+The target video is a photorealistic, cinematic live-action clip on a rainy evening, lit by warm pendant lamps against the blue dusk outside.
+[Shot 1] A medium shot frames <Subject 1>, the man in the charcoal suit from <Picture 1> and <Picture 2>, seated at an oak table in the middle of <Subject 2>, the marble counter behind him; rain runs down the tall windows to his left and the street lights outside blur into soft bokeh. A white coffee cup steams on the table in front of him. The camera pushes in with small amplitude at slow speed. He turns a page of a small paper menu, sets it down, lifts the cup with his right hand and takes a slow sip, then glances at the rain with a faint, content smile while the lamp light glints on his glasses.
+
+overall_soundscape: Steady rain patters on the windows over quiet cafe room tone, with the soft rustle of the paper menu and the light clink of the cup on its saucer.
+
+non_diegetic_music: Soft solo piano at a slow tempo with sparse, quiet chords.

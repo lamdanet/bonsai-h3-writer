@@ -1,0 +1,9 @@
+# `cargo fmt` settings (stable options only). CI runs `cargo fmt --all -- --check`.
+edition = "2021"
+# The code base uses up to 120 columns.
+max_width = 120
+# Let short struct literals, calls and chains use the full width instead of rustfmt's
+# smaller per-construct limits; this matches how the existing code is written.
+use_small_heuristics = "Max"
+# Same line endings as .gitattributes.
+newline_style = "Unix"

@@ -1,0 +1,24 @@
+CHECKLIST BEFORE YOU PASTE BONSAI'S PROMPT INTO COMFYUI
+
+r2v prompt (workflow: 1 - Jiggle (use these)\minimaxh3_r2v jiggle (original layout).json)
+[ ] 6 sections: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music
+[ ] summary starts [reference generation]  -  [keyframe completion] ONLY if Ref 1 is the real first frame (then turn the First-frame pin group ON)
+[ ] <Picture N> numbers match the Ref N order of the Load Image nodes
+[ ] [Shot 1] has no time; later shots "[Shot 2] At 00:03.000, ..." and all times are below the length
+[ ] one take = only [Shot 1]
+[ ] "No subtitles, captions, text, watermarks or logos." is in the style sentence
+
+f2v prompt (workflow: 1 - Jiggle (use these)\minimaxh3_f2v jiggle (original layout).json)
+[ ] line 1 = "For the target video, at 0.00 seconds ..." (first frame only)
+      or "How the reference pictures align ..." with the real length (first + last frame - turn the Last frame image ON)
+[ ] then integrated_multimodal_description / overall_soundscape / non_diegetic_music
+[ ] no <Subject>, subject_definitions or retention_analysis
+[ ] Size aspect matches the first-frame image (f2v stretches it)
+
+ComfyUI settings
+[ ] Duration box = the length you asked for (H3 makes 3s=3.04, 4s=4.46, 5s=5.17, 6s=6.58, 8s=8.00, 10s=10.13, 12s=12.25, 15s=15.08, 20s=20.04)
+[ ] Size: tests 0.2 MP; finals 6 s up to 0.5 MP, 10 s up to 0.4 MP, 15 s at 0.2-0.3 MP
+[ ] Jiggle LoRAs group: bypassed unless you want the jiggle (walking: Bouncing 1.0, Slop off)
+[ ] Watermarks cropped off the reference photos
+[ ] Bonsai CLOSED (type exit in its window) - Bonsai and ComfyUI do not fit on the 8 GB GPU together
+[ ] One render at a time, 4-5 min cool-down, fans on Max

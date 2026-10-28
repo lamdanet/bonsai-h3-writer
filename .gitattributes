@@ -1,0 +1,23 @@
+# Text files are stored with LF and checked out with LF on every OS (this overrides
+# core.autocrlf=true), so the include_str! library texts and the system prompts sent to
+# Bonsai stay byte-identical (llama-server only reuses its prompt cache for identical text).
+* text=auto eol=lf
+
+# Windows scripts are checked out with CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Better diff hunk headers.
+*.rs diff=rust
+*.md diff=markdown
+
+# Binary files: never convert line endings or diff as text.
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.zip binary
+*.exe binary

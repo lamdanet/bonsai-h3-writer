@@ -1,0 +1,18 @@
+subject_definitions:
+<Subject 1> is the man in <Picture 1>: a man in his early fifties with short grey-streaked dark hair, black rectangular glasses and light stubble, wearing a charcoal three-piece suit with a white shirt, a dark tie and black leather shoes.
+<Picture 1> is the first frame of [Shot 1], showing him seated at an oak table in the middle of the sunlit cafe.
+
+summary:
+[keyframe completion] The target video starts exactly on <Picture 1> and continues as <Subject 1> picks up a coffee cup, takes a sip and looks out of the window.
+
+retention_analysis:
+<Picture 1> ([Shot 1] first frame): fully_preserved - the wide framing, his seated pose, the table and the cafe light match <Picture 1> at the start.
+<Subject 1> (appears in [Shot 1]): fully_preserved - his face, glasses, grey-streaked hair and charcoal suit are retained.
+
+detailed_description:
+The target video is a photorealistic, cinematic live-action clip in warm late-morning sunlight.
+[Shot 1] The shot begins from <Picture 1>: <Subject 1>, the man in the charcoal three-piece suit, sits at an oak table in the middle of the sunlit cafe, the marble counter and pendant lamps behind him and the tall windows to his left. The camera pushes in with small amplitude at slow speed. A waiter's hand sets a white cup of coffee on the table; he nods his thanks, lifts the cup with his right hand, takes a slow sip and lowers it to the saucer. He then turns his head toward the window and watches the street outside with a calm, thoughtful expression as the sunlight moves across his glasses.
+
+overall_soundscape: Quiet cafe room tone with a faint espresso-machine hiss, the soft clink of the cup on its saucer and distant street sounds through the windows.
+
+non_diegetic_music: N/A

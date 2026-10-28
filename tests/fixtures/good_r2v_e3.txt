@@ -1,0 +1,18 @@
+subject_definitions:
+<Subject 1> is the man in <Picture 1>, his character reference sheet: a man in his early fifties with short grey-streaked dark hair, black rectangular glasses and light stubble, wearing a charcoal three-piece suit with a white shirt, a dark tie and black leather shoes.
+<Subject 2> is the cafe environment in <Picture 2>: the sunlit corner cafe, with tall windows on the left, light oak tables, rattan chairs, a terrazzo floor, a long white marble counter with a chrome espresso machine, glass pendant lamps and green potted plants.
+
+summary:
+[reference generation] The target video shows <Subject 1> walking into <Subject 2> and sitting down at a table by the window in one continuous shot.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - his face, glasses, grey-streaked hair, charcoal three-piece suit and tie are retained.
+<Subject 2> (appears in [Shot 1]): fully_preserved - the window wall, oak tables, rattan chairs, marble counter, espresso machine, pendant lamps and plants are retained in the same layout and light.
+
+detailed_description:
+The target video is a photorealistic, cinematic live-action clip in warm late-morning sunlight.
+[Shot 1] A wide shot shows <Subject 2>, the empty cafe from <Picture 2>, with sunlight streaming through the tall windows on the left across the oak tables and terrazzo floor. <Subject 1>, the man in the charcoal suit from <Picture 1>, walks in from the right side of the frame carrying a black leather folio, passes the marble counter and heads toward the table by the window. The camera tracks with small amplitude at slow speed, following him across the room. He pulls out a rattan chair, sits down, places the folio on the table, adjusts his glasses and looks out of the window with a calm expression, the sunlight falling across his face.
+
+overall_soundscape: Quiet cafe room tone with a faint espresso-machine hiss, his footsteps on the terrazzo, the scrape of the chair and the soft tap of the folio on the table.
+
+non_diegetic_music: N/A

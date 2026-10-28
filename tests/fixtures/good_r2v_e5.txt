@@ -1,0 +1,20 @@
+subject_definitions:
+<Subject 1> is the woman in <Picture 1>, her character reference sheet: a young woman in her mid-twenties with long straight dark-brown hair in a low ponytail.
+<Subject 2> is the blue denim jacket worn by the man in <Picture 2>, with brass buttons, chest pockets and a pointed collar.
+<Subject 3> is the plain charcoal studio backdrop and soft top lighting of the reference sheets in <Picture 1> and <Picture 2>.
+
+summary:
+[reference generation] The target video shows <Subject 1> in a photo studio wearing <Subject 2> over her white blouse, turning slowly to pose in front of a backdrop styled after <Subject 3>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): partially_preserved - her face, ponytail and white blouse are retained, but her black pencil skirt is replaced by blue jeans.
+<Subject 2> (appears in [Shot 1]): attribute_transfer - the denim jacket from the man in <Picture 2> is now worn by <Subject 1>, keeping its colour, brass buttons and collar.
+<Subject 3> (appears in [Shot 1]): weak_reference - only the dark, plain backdrop and soft top-light mood are kept.
+
+detailed_description:
+The target video is a photorealistic fashion-studio clip with soft, even top lighting and a muted colour palette.
+[Shot 1] A medium-full shot frames <Subject 1>, the young woman from <Picture 1>, standing in front of a plain charcoal studio backdrop that echoes <Subject 3>. She wears <Subject 2>, the blue denim jacket with brass buttons from <Picture 2>, open over her crisp white blouse, with blue jeans and white sneakers. The camera arcs with small amplitude at slow speed to her left. She turns slowly from a three-quarter view to face the camera, slides both hands into the jacket pockets, shifts her weight onto one hip and gives a calm, confident smile while her ponytail settles over her shoulder.
+
+overall_soundscape: Quiet studio room tone with the soft rustle of denim and the light squeak of her sneakers on the floor.
+
+non_diegetic_music: A slow, minimal electronic beat with a soft synth pad that stays at a low, steady volume.

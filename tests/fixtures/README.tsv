@@ -1,0 +1,17 @@
+# fixture	context
+good_r2v_e1.txt	mode=r2v	duration=3	refs=1	pinned=false	last_frame=false
+good_r2v_e2.txt	mode=r2v	duration=3	refs=2	pinned=false	last_frame=false
+good_r2v_e3.txt	mode=r2v	duration=3	refs=2	pinned=false	last_frame=false
+good_r2v_e4.txt	mode=r2v	duration=3	refs=2	pinned=false	last_frame=false
+good_r2v_e5.txt	mode=r2v	duration=3	refs=2	pinned=false	last_frame=false
+good_r2v_e6.txt	mode=r2v	duration=3	refs=1	pinned=true	last_frame=false
+good_f2v_e7.txt	mode=f2v	duration=3	refs=1	pinned=false	last_frame=false
+good_f2v_e8.txt	mode=f2v	duration=3	refs=2	pinned=false	last_frame=true
+good_r2v_romance_1.txt	mode=r2v	duration=6	refs=2	pinned=false	last_frame=false
+good_r2v_romance_2.txt	mode=r2v	duration=6	refs=2	pinned=false	last_frame=false
+good_r2v_romance_3.txt	mode=r2v	duration=10	refs=2	pinned=false	last_frame=false
+good_r2v_romance_4.txt	mode=r2v	duration=10	refs=2	pinned=false	last_frame=false
+good_r2v_romance_5.txt	mode=r2v	duration=15	refs=2	pinned=false	last_frame=false
+good_r2v_romance_6.txt	mode=r2v	duration=15	refs=2	pinned=false	last_frame=false
+good_r2v_romance_7.txt	mode=r2v	duration=6	refs=2	pinned=false	last_frame=false
+bad_r2v_markdown_fake_shots.txt	mode=r2v	duration=15	refs=2	pinned=false	last_frame=false	expect=errors: markdown-headings, shot-time-format (Around), single-take-with-shots

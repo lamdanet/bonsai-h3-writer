@@ -1,0 +1,18 @@
+subject_definitions:
+<Subject 1> is the woman whose appearance comes from <Picture 1> and <Picture 2>: a young adult woman with long black hair pulled up in a high bun with a few loose strands framing her face, fair skin, soft dark eyes, full pink lips, small drop earrings and a thin gold necklace, and a full, curvy figure.
+<Subject 2> is the bedroom environment in <Picture 2>, with soft cream marble-textured walls, a black pendant lamp, a white bed with cream bedding, a round wooden nightstand, a white boucle armchair and a large window with green trees outside.
+
+summary:
+[reference generation] The target video is a 6-second single continuous take of a tender romance scene: <Subject 1>, wearing a white linen sundress, sits beside a young man on the edge of the bed in <Subject 2> in soft morning light, and they share a slow kiss while the camera pushes in, arcs around them and settles on her smile.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): partially_preserved - her face, high bun, loose strands, fair skin, pink lips, earrings, necklace and figure are retained, but her swimwear from <Picture 1> and <Picture 2> is replaced by a white linen sundress.
+<Subject 2> (appears in [Shot 1]): fully_preserved - the cream marble-textured walls, pendant lamp, white bed, wooden nightstand, boucle armchair and window are retained in soft daylight.
+
+detailed_description:
+The target video is a cinematic film scene with a 35mm anamorphic look: soft film grain, gentle halation around the window light, a warm golden colour grade, shallow depth of field and slow, deliberate camera work. No subtitles, captions, text, watermarks or logos.
+[Shot 1] A side-view medium shot frames the white bed in <Subject 2>, the cream marble-textured walls, black pendant lamp and boucle armchair melting into soft focus behind it, morning light pouring through the large window across the cream bedding. A young man with short dark hair and light stubble, wearing a light-blue linen shirt with rolled sleeves and beige chinos, sits on the edge of the bed. <Subject 1>, the woman from <Picture 1> and <Picture 2>, in a knee-length white linen sundress with wide straps, sits close beside him with one hand resting on his shoulder, the loose strands of her hair glowing in the backlight. She leans in and kisses him slowly, and he lifts a hand to her cheek. The camera pushes in with small amplitude at slow speed, then arcs around the couple at slow speed from the side to a front three-quarter angle, revealing her closed eyes, her pink lips and the warm light on her face. The kiss ends gently: she draws back a little and rests her forehead against his, and both smile. The camera settles into a close-up on her face as she opens her eyes and smiles softly, a loose strand of black hair falling across her cheek.
+
+overall_soundscape: Quiet bedroom room tone with birdsong and a light breeze through the window, the soft rustle of linen and bedding, their quiet breathing and a soft shared laugh at the end.
+
+non_diegetic_music: Soft solo piano at a slow tempo with sustained warm strings, gently rising in volume and fading out at the end.

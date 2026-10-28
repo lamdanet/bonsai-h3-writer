@@ -1,0 +1,29 @@
+**subject_definitions**
+
+<Subject 1> is the dark-haired woman in <Picture 1> and <Picture 2>, with long black hair gathered in a loose top-knot bun, a slender face, bright eyes and red lips.
+<Subject 2> is the marble bedroom environment from <Picture 1>, with veined travertine walls and a skylight casting warm sunlight.
+
+**summary**
+
+[reference generation] The target video is a 15-second single continuous take (no cuts) of a cinematic scene: <Subject 1> sits on the bed in <Subject 2> while the camera moves from a side view to a low close-up.
+
+**retention_analysis**
+
+<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4]): fully_preserved - her bun, face and red lips are retained.
+<Subject 2> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4]): fully_preserved - the travertine walls and skylight stay visible.
+
+**detailed_description**
+
+The target video is a 15-second continuous single-take cinematic clip with warm natural light.
+[Shot 1] The camera starts in a side-view medium shot at the foot of the bed. <Subject 1> sits on the bed and looks out of the window.
+[Shot 2] Around 00:05.000 the camera continues its motion without cutting, arcing around her toward a front three-quarter angle.
+[Shot 3] Around 00:10.000 the camera rises in a slow overhead pass.
+[Shot 4] Around 00:13.000 the camera descends into a low-angle close-up as she smiles.
+
+**overall_soundscape**
+
+Soft indoor room tone; no distinct sound events.
+
+**non_diegetic_music**
+
+N/A

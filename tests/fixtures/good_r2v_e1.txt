@@ -1,0 +1,16 @@
+subject_definitions:
+<Subject 1> is the woman in <Picture 1>, her character reference sheet: a young woman in her mid-twenties with long straight dark-brown hair in a low ponytail, wearing a crisp white button-up blouse, a black knee-length pencil skirt and black heels.
+
+summary:
+[reference generation] The target video shows <Subject 1> walking along a sunny city sidewalk in one continuous shot; she stops, checks her phone and says one short line.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - her face, hairstyle, build, white blouse, black pencil skirt and heels are retained.
+
+detailed_description:
+The target video is a photorealistic, cinematic live-action clip in bright late-morning daylight with soft natural colours.
+[Shot 1] A medium shot frames <Subject 1>, the young woman from <Picture 1>, walking toward the camera along a clean city sidewalk lined with young trees, glass shop fronts and parked bicycles; warm sunlight falls from the left and dapples her white blouse through the leaves. Her ponytail swings gently with each step and her heels click on the paving stones. The camera pulls out with small amplitude at slow speed, keeping her at the same size in the frame. After a few steps she slows down, lifts a black phone in her left hand to read the screen, and a relaxed smile spreads across her face. The young woman with a calm, clear voice (S1) says: <d>[English] Okay, I'm on my way.</d> She lowers the phone and keeps walking at an easy, confident pace.
+
+overall_soundscape: Light city ambience with distant traffic and birdsong, her heels clicking steadily on the paving stones and the soft rustle of leaves in a breeze.
+
+non_diegetic_music: N/A

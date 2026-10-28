@@ -1,0 +1,59 @@
+REQUEST TEMPLATES - copy one, fill the < >, send it to Bonsai.
+Describe each picture in words (look, clothes, place). Uploading the image itself costs ~1,100 tokens and ~18 s per picture.
+Ref order in ComfyUI = Picture order here.
+
+==================== r2v (use system prompt 2a) ====================
+
+--- 1 photo of a person ---
+Ref 1: <age, hair, face, clothes>.
+Place: <where the video happens, light, time of day>.
+<6> s, <one take / N cuts>: <what she does, one continuous action>. Style: <film look / natural / ...>.
+
+--- several photos of the same person ---
+Ref 1: <the woman, front face close-up, outfit>. Ref 2: the same woman, <full body / side view, outfit>. Ref 3: the same woman, <...>.
+Use the outfit from Ref <N> (or: she wears <new outfit>).
+Place: <...>. <6> s, <one take>: <action>. Style: <...>.
+
+--- person + place photo ---
+Ref 1: <the person, look, clothes>. Ref 2: <the place, empty, its key features, light>.
+<10> s, <2 cuts>: <shot 1 action>, then <shot 2>, then <shot 3>. Style: <...>.
+
+--- one photo gives the person and the place ---
+Ref 1: <the woman, look, clothes> in <the place, its features>. Use the place from Ref 1.
+<6> s, one take: <action>. Style: <...>.
+
+--- two or more people ---
+Ref 1: <person 1, look, clothes>. Ref 2: <person 2, look, clothes>.
+Place: <...>. <10> s, <2 cuts>: <who does what, who says what (exact words in quotes)>. Style: <...>.
+
+--- a person without a photo joins the scene ---
+Ref 1: <the woman>. Ref 2: <the place>. A <young man with short dark hair, blue shirt> (no photo) <does ...>.
+<8> s, one take: <action>. Style: <...>.
+
+--- outfit or prop from another photo ---
+Ref 1: <the woman>. Ref 2: <a man wearing a denim jacket with brass buttons>. She wears his jacket.
+Place: <...>. <6> s: <action>. Style: <...>.
+
+--- style / mood from a photo ---
+Ref 1: <the woman>. Ref 2: <a photo whose look you want: colours, light, grain>. Only copy the look of Ref 2.
+Place: <...>. <6> s: <action>.
+
+--- Ref 1 is the exact first frame (turn the First-frame pin group ON in ComfyUI) ---
+Ref 1 is the first frame: <what it shows exactly: who, pose, where, framing>.
+<6> s, one take: <what happens next>. Style: <...>.
+
+--- with dialogue ---
+... <she> says "<exact words>". <he> answers "<exact words>". (Bonsai adds the (S1)/(S2) IDs and <d> tags.)
+
+==================== f2v (use system prompt 2b) ====================
+
+--- first frame only ---
+Picture 1: <what the first frame shows: who, clothes, pose, place, light, framing>.
+<6> s: <what happens next, one continuous action>. Camera: <pulls back / tracks / static>.
+
+--- first + last frame (turn the Last frame image ON in ComfyUI) ---
+Picture 1: <the first frame>. Picture 2: <the last frame>.
+<6> s, one shot: <how she gets from the first to the last frame>.
+
+==================== length words ====================
+3 s quick test | 6 s one take or 1-2 cuts | 10 s up to 3 cuts | 15 s up to 4 cuts (heavy on the laptop: 0.2-0.3 MP)

@@ -1,0 +1,18 @@
+subject_definitions:
+<Subject 1> is the woman whose appearance comes from <Picture 1> and <Picture 2>: a young adult woman with long black hair pulled up in a high bun with a few loose strands framing her face, fair skin, soft dark eyes, full pink lips, small drop earrings and a thin gold necklace.
+<Subject 2> is the bedroom environment in <Picture 2>, with soft cream marble-textured walls, a black pendant lamp and a large window with green trees outside.
+
+summary:
+[reference generation] The target video is a 6-second single continuous take in a very close side view from the bust up: <Subject 1> in a white linen sundress and a young man face each other in the soft window light of <Subject 2>, share a slow kiss and touch foreheads, while the camera barely moves and the focus shifts from him to her.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): partially_preserved - her face, high bun, loose strands, fair skin, pink lips, earrings and necklace are retained, but her swimwear from <Picture 1> and <Picture 2> is replaced by a white linen sundress.
+<Subject 2> (appears in [Shot 1]): weak_reference - only the cream walls and the window light are seen, heavily out of focus behind them.
+
+detailed_description:
+The target video is an intimate cinematic film close-up with a 35mm anamorphic look: very shallow depth of field, soft film grain, gentle halation and oval bokeh from the window light, and a warm golden colour grade. No subtitles, captions, text, watermarks or logos.
+[Shot 1] A very close side view frames the two of them in profile from the bust up, facing each other, with the large window of <Subject 2> glowing as soft golden bokeh behind them and the cream walls melting into blur. On the left, a young man with short dark hair and light stubble, in a light-blue linen shirt, is in sharp focus. On the right, <Subject 1>, the woman from <Picture 1> and <Picture 2>, in a white linen sundress with wide straps, is soft at first; the focus slowly pulls from his face to hers, revealing her long lashes, the loose strands of black hair framing her cheek and the small drop earring catching the light. The camera pushes in with small amplitude at slow speed. She closes her eyes and leans in, and they share a slow, gentle kiss, his hand rising to cradle her jaw. The kiss ends softly; they rest their foreheads together, their profiles touching in the backlight, and she smiles with her eyes still closed.
+
+overall_soundscape: Near-silent room tone with faint birdsong outside, the soft rustle of linen and their quiet breathing, and a tiny, happy exhale from her at the end.
+
+non_diegetic_music: A single sustained cello note under sparse, slow piano tones, staying very quiet and fading out at the end.

@@ -1,0 +1,194 @@
+# Publishes a GitHub release with the Windows zip when a version tag is pushed:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+# The tag must match `version` in Cargo.toml. Step-by-step guide: docs/RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, e.g. v0.1.0 (must match the version in Cargo.toml). Leave empty for a dry run that only uploads the zip as a workflow artifact, also when the run starts from a tag."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    name: Build and publish (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve version and tag
+        id: meta
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          # Version from the [package] section of Cargo.toml.
+          $version = $null
+          $section = ''
+          foreach ($line in Get-Content -LiteralPath Cargo.toml) {
+            if ($line -match '^\s*\[') { $section = $line.Trim(); continue }
+            if ($section -eq '[package]' -and $line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          if (-not $version) {
+            Write-Output '::error file=Cargo.toml::No version found in the [package] section of Cargo.toml.'
+            exit 1
+          }
+
+          # Tag to publish: the pushed tag. Manual run: only the "tag" input. Empty is always a dry run,
+          # also when the run was started from a tag, so a test run never replaces a published zip.
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $tag = "$env:REQUESTED_TAG".Trim()
+            if ($tag -match '^\d') { $tag = "v$tag" }
+          }
+
+          $publish = 'false'
+          if ($tag) {
+            if ($tag -cne "v$version") {
+              Write-Output "::error file=Cargo.toml,title=Tag does not match Cargo.toml::Tag '$tag' does not match version $version in Cargo.toml - the tag for this version is v$version."
+              Write-Output "To publish ${tag}, set version = `"$($tag -replace '^v', '')`" in Cargo.toml, run cargo build (updates Cargo.lock),"
+              Write-Output 'commit both files and move the tag to that commit:'
+              Write-Output "  git tag -f $tag"
+              Write-Output "  git push -f origin $tag"
+              Write-Output "Or delete the wrong tag with: git push --delete origin $tag   (see docs/RELEASING.md)"
+              exit 1
+            }
+            if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+              # Never attach binaries built from this commit to a tag that points at another commit.
+              $refs = @(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")
+              if ($LASTEXITCODE -ne 0) {
+                Write-Output "::error::git ls-remote failed with exit code $LASTEXITCODE."
+                exit 1
+              }
+              if ($refs.Count -gt 0) {
+                $peeled = @($refs | Where-Object { $_ -like '*^{}' })
+                $tagLine = if ($peeled.Count -gt 0) { $peeled[0] } else { $refs[0] }
+                $tagCommit = ($tagLine -split '\s+')[0]
+                if ($tagCommit -ne $env:GITHUB_SHA) {
+                  Write-Output "::error title=Tag exists on another commit::Tag $tag points to $tagCommit but this run builds $env:GITHUB_SHA. Start the run from the tag itself (Use workflow from > Tags > $tag) or delete the tag first."
+                  exit 1
+                }
+              }
+            }
+            $publish = 'true'
+            Write-Output "Publishing $tag (version $version, prerelease: $($tag.Contains('-')))."
+          } else {
+            Write-Output "Dry run: no tag given, so version $version is built and uploaded as a workflow artifact without a GitHub release."
+          }
+
+          @(
+            "version=$version"
+            "tag=$tag"
+            "publish=$publish"
+            "package=BonsaiH3Writer-$version-windows-x64"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Read the Rust version from rust-toolchain.toml
+        id: toolchain
+        run: |
+          # The same pinned Rust as CI, so a release is built with the compiler that was tested.
+          $match = Select-String -LiteralPath rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) {
+            Write-Output '::error file=rust-toolchain.toml::No channel = "..." line found in rust-toolchain.toml.'
+            exit 1
+          }
+          $channel = $match.Matches[0].Groups[1].Value
+          Write-Output "Rust $channel (pinned in rust-toolchain.toml)"
+          "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install Rust ${{ steps.toolchain.outputs.channel }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        # Same script as a local release build; -SkipBuild uses the binaries from the step above.
+        run: ./scripts/package.ps1 -SkipBuild
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.package }}
+          path: |
+            dist/${{ steps.meta.outputs.package }}.zip
+            dist/${{ steps.meta.outputs.package }}.zip.sha256
+          if-no-files-found: error
+
+      - name: Release notes from CHANGELOG.md
+        if: steps.meta.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          PACKAGE: ${{ steps.meta.outputs.package }}
+        run: |
+          # The "## [<version>]" section of CHANGELOG.md; GitHub appends its generated notes below it.
+          $notes = New-Object System.Collections.Generic.List[string]
+          $inSection = $false
+          foreach ($line in Get-Content -LiteralPath CHANGELOG.md -Encoding utf8) {
+            if ($line -match '^##\s+\[?([^\]\s]+)') {
+              if ($inSection) { break }
+              $inSection = $Matches[1] -eq $env:VERSION
+              continue
+            }
+            if ($inSection) { $notes.Add($line) }
+          }
+          $body = ($notes -join "`n").Trim()
+          if (-not $body) {
+            Write-Output "::warning file=CHANGELOG.md::CHANGELOG.md has no '## [$env:VERSION]' section, so the release only gets the generated notes."
+            $body = 'See CHANGELOG.md for the changes in this version.'
+          }
+          $download = @'
+          ### Download
+
+          `{0}.zip` for Windows 10/11 (x64): extract it anywhere and run `bonsai-h3-writer.exe`; `bh3.exe` is the command line tool.
+          To check the download, `(Get-FileHash .\{0}.zip -Algorithm SHA256).Hash` must match the hash in `{0}.zip.sha256`.
+          '@ -f $env:PACKAGE
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Set-Content -LiteralPath dist/RELEASE_NOTES.md -Value ($body + "`n`n" + $download) -Encoding utf8
+          Get-Content -LiteralPath dist/RELEASE_NOTES.md
+
+      - name: Publish GitHub release
+        if: steps.meta.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Bonsai H3 Writer ${{ steps.meta.outputs.tag }}
+          # Only used when a manual run creates the tag: tag the commit that was built.
+          target_commitish: ${{ github.sha }}
+          body_path: dist/RELEASE_NOTES.md
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ steps.meta.outputs.package }}.zip
+            dist/${{ steps.meta.outputs.package }}.zip.sha256

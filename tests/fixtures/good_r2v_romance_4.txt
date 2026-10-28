@@ -1,0 +1,21 @@
+subject_definitions:
+<Subject 1> is the woman whose appearance comes from <Picture 1> and <Picture 2>: a young adult woman with long black hair pulled up in a high bun with a few loose strands framing her face, fair skin, soft dark eyes, full pink lips, small drop earrings and a thin gold necklace, and a full, curvy figure.
+<Subject 2> is the bedroom environment in <Picture 2>, with soft cream marble-textured walls, a black pendant lamp, a white bed with cream bedding, a round wooden nightstand, a white boucle armchair and a large window with green trees outside.
+
+summary:
+[reference generation] The target video is a 10-second, four-shot romance scene in <Subject 2>: a wide shot of <Subject 1> in a white linen sundress sitting down beside a young man on the bed, a medium two-shot as he greets her, a close side profile of their kiss, and a close-up of her whispering reply.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4]): partially_preserved - her face, high bun, loose strands, fair skin, pink lips, earrings, necklace and figure are retained, but her swimwear from <Picture 1> and <Picture 2> is replaced by a white linen sundress.
+<Subject 2> (appears in [Shot 1], [Shot 2], [Shot 3], [Shot 4]): fully_preserved - the cream marble-textured walls, pendant lamp, white bed, wooden nightstand, boucle armchair and window are retained in soft daylight.
+
+detailed_description:
+The target video is a cinematic film scene with a 35mm anamorphic look: soft film grain, gentle halation around the window light, a warm golden colour grade, shallow depth of field and slow, deliberate camera work. No subtitles, captions, text, watermarks or logos.
+[Shot 1] A wide shot shows <Subject 2> in soft morning light, the large window glowing behind the white bed. A young man with short dark hair and light stubble, wearing a light-blue linen shirt with rolled sleeves and beige chinos, sits on the edge of the bed. <Subject 1>, the woman from <Picture 1> and <Picture 2>, in a knee-length white linen sundress with wide straps, walks in from the right and sits down close beside him. The camera holds a static shot.
+[Shot 2] At 00:02.500, the camera cuts to a medium two-shot from the front. He turns to her, and the young man with a warm, low voice (S1) says softly: <d>[English] Good morning.</d> She smiles shyly and rests one hand on his shoulder. The camera pushes in with small amplitude at slow speed.
+[Shot 3] At 00:05.000, the camera cuts to a close side profile of the two of them from the shoulders up, the window light glowing out of focus behind them. She leans in and they share a slow kiss; he lifts a hand to her cheek and the loose strands of her hair glow in the backlight. The camera holds a static shot.
+[Shot 4] At 00:08.000, the camera cuts to a close-up of <Subject 1>'s face as she rests her forehead against his and opens her eyes, and the young woman with a soft, gentle voice (S2) whispers: <d>[English] Stay a little longer.</d> A soft smile spreads across her pink lips.
+
+overall_soundscape: Quiet bedroom room tone with birdsong through the window, her soft footsteps on the wooden floor, the creak of the bed as she sits, the rustle of linen and their quiet breathing.
+
+non_diegetic_music: Soft solo piano at a slow tempo with sustained warm strings that swell slightly during the kiss and fade out at the end.

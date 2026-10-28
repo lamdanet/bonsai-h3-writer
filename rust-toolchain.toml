@@ -1,0 +1,7 @@
+# The Rust version for local builds, CI and releases: rustup installs it on the first cargo command
+# in this folder, and both GitHub workflows read the channel from here. A new Rust can bring new
+# lints that fail CI's `clippy -D warnings`, so bump it on purpose (see docs/RELEASING.md).
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

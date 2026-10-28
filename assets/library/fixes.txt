@@ -1,0 +1,28 @@
+FOLLOW-UP FIXES - send one of these in the same chat right after Bonsai's answer.
+Each costs only a few hundred tokens because the rules and the last answer are already cached.
+To switch between r2v and f2v, write a new request in the other mode instead of a fix.
+
+==================== both modes ====================
+
+This is a single take: use only [Shot 1] and no times inside it.
+Make it <10> s with <2> cuts: [Shot 2] At 00:0X.000 ... [Shot 3] At 00:0X.000 ...
+Add a line of dialogue: she says "<exact words>".
+Make the camera <push in slowly / arc around her / stay static / track with her>.
+Remove the music (non_diegetic_music: N/A).
+
+==================== r2v ====================
+
+Make the detailed_description longer (about 350 words): add light, fabric, hair movement, small gestures and the camera.
+Remove [keyframe completion] and "begins from <Picture 1>": the pictures only give the look and the place.
+Change her outfit to <...> and mark her partially_preserved.
+Use the place from Ref <N> as <Subject 2>.
+Make it a close side view from the bust up with shallow depth of field.
+Give it a film look: 35mm, soft grain, warm grade, shallow depth of field.
+
+==================== f2v ====================
+
+Make integrated_multimodal_description longer (about 250 words): add light on skin and fabric, hair and cloth movement, small gestures and the camera.
+Keep Picture 1 exactly: describe its people, clothes, place and light as they are, then only what happens next.
+With a last frame: end the last shot "settling into the pose, spacing, light and composition established by Picture 2 at the end of the shot".
+
+If an answer goes badly wrong, start a NEW chat instead of fixing it - long chats fill the 16k context.
