@@ -108,11 +108,58 @@ impl RefRole {
             RefRole::Storyboard => "Storyboard",
         }
     }
+    /// Short id for the command line and file names, e.g. `person`, `first-frame`.
+    pub fn id(&self) -> &'static str {
+        match self {
+            RefRole::Person => "person",
+            RefRole::SamePerson => "same-person",
+            RefRole::Place => "place",
+            RefRole::PersonAndPlace => "person-and-place",
+            RefRole::Outfit => "outfit",
+            RefRole::Prop => "prop",
+            RefRole::Style => "style",
+            RefRole::FirstFrame => "first-frame",
+            RefRole::LastFrame => "last-frame",
+            RefRole::Keyframe => "keyframe",
+            RefRole::Storyboard => "storyboard",
+        }
+    }
     /// Roles that make sense in a mode (f2v: FirstFrame, LastFrame only).
     pub fn allowed_in(&self, mode: Mode) -> bool {
         match mode {
             Mode::F2v => matches!(self, RefRole::FirstFrame | RefRole::LastFrame),
             Mode::R2v => !matches!(self, RefRole::LastFrame),
+        }
+    }
+}
+
+impl std::fmt::Display for RefRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+impl std::str::FromStr for RefRole {
+    type Err = anyhow::Error;
+    /// [`RefRole::id`] (also with `_` or spaces) and a few plain words: `background`, `object`,
+    /// `look`, `first`, `last`.
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        let key = s.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+        if let Some(role) = RefRole::all().iter().find(|r| r.id() == key) {
+            return Ok(*role);
+        }
+        match key.as_str() {
+            "background" | "place-background" | "environment" => Ok(RefRole::Place),
+            "person-place" => Ok(RefRole::PersonAndPlace),
+            "clothes" | "clothing" => Ok(RefRole::Outfit),
+            "object" => Ok(RefRole::Prop),
+            "look" | "style-only" => Ok(RefRole::Style),
+            "first" | "first-frame-pin" | "frame" => Ok(RefRole::FirstFrame),
+            "last" => Ok(RefRole::LastFrame),
+            _ => {
+                let ids: Vec<&str> = RefRole::all().iter().map(RefRole::id).collect();
+                anyhow::bail!("unknown role '{}' (use {})", s.trim(), ids.join(", "))
+            }
         }
     }
 }
@@ -127,6 +174,24 @@ pub struct RefImage {
     pub image_path: Option<PathBuf>,
     /// Send the pixels to Bonsai's vision input (~1,100 tokens and ~18 s each).
     pub send_image: bool,
+    /// The description Bonsai wrote for the picture ([`crate::describe`]). While `description`
+    /// still is this text, it counts as Bonsai's and a new description may replace it; once the
+    /// user edits it, it is the user's and is never overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_description: Option<String>,
+}
+
+impl RefImage {
+    /// `description` is Bonsai's untouched text.
+    pub fn description_is_auto(&self) -> bool {
+        let text = self.description.trim();
+        !text.is_empty() && self.auto_description.as_deref().is_some_and(|auto| auto.trim() == text)
+    }
+
+    /// Bonsai may write the description without asking: it is empty or still Bonsai's own text.
+    pub fn may_auto_describe(&self) -> bool {
+        self.description.trim().is_empty() || self.description_is_auto()
+    }
 }
 
 /// Look of the clip.
@@ -381,7 +446,7 @@ impl RequestSpec {
             let name = self.ref_name(i);
             if r.description.trim().is_empty() && !r.send_image {
                 out.push(format!(
-                    "{name} has no description: describe the picture in words (or turn on \"send to Bonsai\")"
+                    "{name} has no description: describe the picture in words or let Bonsai describe it once                      (\"Describe with Bonsai\", `bh3 describe`), or turn on \"send to Bonsai\""
                 ));
             }
             if r.send_image && r.image_path.is_none() {

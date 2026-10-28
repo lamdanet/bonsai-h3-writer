@@ -13,6 +13,11 @@
 //!   the library fresh (so Library edits apply) and finish through [`crate::writer::finish`].
 //!   Every job calls `touch()` when it starts and ends. Requests are always streamed (so they can
 //!   be cancelled), whatever `GenParams::stream` says.
+//! - `JobKind::Describe` asks Bonsai's vision input for a picture's description (see
+//!   [`crate::describe`]): with `use_cache` a picture + role described before is answered from
+//!   the cache at once (`DescribeDone` with `cached`, no server needed); otherwise it queues like
+//!   any job, checks `/props` for a vision projector (`JobFailed` with [`describe::NO_VISION`]),
+//!   streams the answer, cleans it and stores it in the cache.
 //! - A job waits while the server is not Ready: no usable install -> `JobFailed("Choose the
 //!   Bonsai folder first ...")`; auto-start off -> `JobFailed("Bonsai is not running ...")`;
 //!   otherwise `ServerManager::start` (non-forced: refuses while other programs use VRAM, without
@@ -36,6 +41,13 @@
 //! - `Shutdown`: cancel jobs; stop the server if `stop_on_exit` and started_by_us; send
 //!   `ShutdownComplete`; end the thread. A [`ServiceHandle`] dropped without a `Shutdown` (e.g.
 //!   the UI panicked) sends one and waits for it, up to 15 s.
+//! - `RunTask`: a download or import ([`RuntimeTask`]) runs on its own thread (never on the UI or
+//!   control thread) with its own cancel flag: `TaskProgress` about 5 times a second, then one of
+//!   `TaskDone` / `TaskFailed` / `TaskCancelled` (a cancelled download keeps its `.part` and
+//!   resumes when the same task runs again). Several tasks may run at once, but not two with the
+//!   same target files. While a task writes (or moves away) the files of the chosen install,
+//!   Bonsai is not started - neither by the Start button nor for a job. The service does not
+//!   change the settings: the UI decides what to use when a task is done (`SetInstall`).
 //! - After every event sent, call the `repaint` callback.
 
 use std::any::Any;
@@ -51,10 +63,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::client::{BonsaiClient, ChatResult, ServerProps, SlotsActivity, StreamEvent};
 use crate::config::AppConfig;
-use crate::gen::{ChatMessage, GenParams, ThinkingMode};
+use crate::describe::{self, Described, DescriptionCache};
+use crate::gen::{ChatMessage, GenParams, ImageAttachment, ThinkingMode};
 use crate::gpu::{self, GpuInfo};
 use crate::library::Library;
-use crate::server::{BonsaiInstall, ServerManager, ServerState, StartOptions};
+use crate::runtime::{self, RuntimeTask, TaskOutcome, TaskProgress};
+use crate::server::{self, BonsaiInstall, ServerManager, ServerState, StartOptions};
 use crate::writer::{self, WriteJob, WriteOutcome};
 
 /// Id the UI gives each job.
@@ -69,6 +83,9 @@ pub enum JobKind {
     Write(WriteJob),
     /// Free chat: full message list (system prompt included by the caller when wanted).
     Chat { messages: Vec<ChatMessage>, params: GenParams },
+    /// Describe one picture for its role with Bonsai's vision input ([`crate::describe`]);
+    /// `use_cache` answers a picture + role described before from the cache (false = re-describe).
+    Describe { image: std::path::PathBuf, role: crate::request::RefRole, use_cache: bool },
 }
 
 /// UI -> service.
@@ -94,6 +111,10 @@ pub enum Command {
     UpdateConfig(Box<AppConfig>),
     /// New install folder (or none).
     SetInstall(Option<BonsaiInstall>),
+    /// Run a download / import on its own thread (answered with progress, then one final event).
+    RunTask { id: JobId, task: RuntimeTask },
+    /// Cancel a running task (answered with `TaskCancelled`; a download keeps its `.part`).
+    CancelTask(JobId),
     /// Cancel everything, stop the server if the settings say so, then end the service.
     Shutdown,
 }
@@ -126,6 +147,8 @@ pub struct StatusSnapshot {
     pub queued: usize,
     /// Last lines of the server log.
     pub log_tail: Vec<String>,
+    /// Downloads / imports running.
+    pub tasks_running: usize,
 }
 
 /// Service -> UI.
@@ -143,6 +166,8 @@ pub enum Event {
     WriteDone { id: JobId, outcome: Box<WriteOutcome> },
     /// A chat job finished.
     ChatDone { id: JobId, result: Box<ChatResult> },
+    /// A describe job finished (from Bonsai or the cache).
+    DescribeDone { id: JobId, outcome: Box<Described> },
     /// A job failed; `error` is ready to show.
     JobFailed { id: JobId, error: String },
     /// A job was cancelled (queued or running).
@@ -153,6 +178,14 @@ pub enum Event {
     Notice(String),
     /// Error for a toast (e.g. a failed manual start).
     Error(String),
+    /// Progress of a download / import.
+    TaskProgress { id: JobId, progress: TaskProgress },
+    /// A task finished.
+    TaskDone { id: JobId, outcome: Box<TaskOutcome> },
+    /// A task failed; `error` is ready to show.
+    TaskFailed { id: JobId, error: String },
+    /// A task was cancelled.
+    TaskCancelled(JobId),
     /// Sent once after `Shutdown` finished (server stopped if it had to be); the thread then ends.
     ShutdownComplete,
 }
@@ -335,6 +368,8 @@ impl Outbox {
 enum Internal {
     /// A job thread sent its final event.
     JobFinished(JobId),
+    /// A task thread sent its final event.
+    TaskFinished(JobId),
     /// The stop helper is done and hands the manager back.
     StopDone { manager: Box<ServerManager>, result: Result<(), String>, reason: StopReason },
     /// GPU poll result.
@@ -370,6 +405,15 @@ struct QueuedJob {
 struct RunningJob {
     id: JobId,
     cancel: Arc<AtomicBool>,
+}
+
+/// A download / import on its thread.
+struct RunningTask {
+    id: JobId,
+    cancel: Arc<AtomicBool>,
+    title: String,
+    /// What it writes or moves away (`RuntimeTask::targets`).
+    targets: Vec<std::path::PathBuf>,
 }
 
 /// Jobs wait for the server to come up.
@@ -682,6 +726,8 @@ struct Service {
     slots_pending: bool,
     /// When the next periodic `/slots` check is due.
     next_slots: Instant,
+    /// Downloads / imports running.
+    tasks: Vec<RunningTask>,
     /// The last `/slots` answer while the auto-stop counts down (compared with the next one).
     last_slots: Option<SlotsActivity>,
     next_refresh: Instant,
@@ -693,7 +739,7 @@ struct Service {
 
 impl Service {
     fn new(config: AppConfig, out: Outbox) -> Self {
-        let desired_install = config.bonsai_dir.as_deref().and_then(|dir| BonsaiInstall::detect(dir).ok());
+        let desired_install = server::install_from_config(&config);
         let built_url = config.base_url();
         let manager = ServerManager::new(desired_install.clone().unwrap_or_default(), &built_url);
         let (internal_tx, internal_rx) = mpsc::channel();
@@ -726,6 +772,7 @@ impl Service {
             tokens: None,
             slots_pending: false,
             next_slots: now,
+            tasks: Vec::new(),
             last_slots: None,
             next_refresh: now,
             next_log: now,
@@ -776,6 +823,12 @@ impl Service {
                 self.desired_install = install;
                 self.dirty = true;
             }
+            Command::RunTask { id, task } => self.run_task(id, task),
+            Command::CancelTask(id) => {
+                if let Some(task) = self.tasks.iter().find(|t| t.id == id) {
+                    task.cancel.store(true, Ordering::SeqCst);
+                }
+            }
             Command::Shutdown => {} // handled by `run`
         }
     }
@@ -789,6 +842,10 @@ impl Service {
                 if let Some(mgr) = self.manager.as_mut() {
                     mgr.touch();
                 }
+                self.dirty = true;
+            }
+            Internal::TaskFinished(id) => {
+                self.tasks.retain(|t| t.id != id);
                 self.dirty = true;
             }
             Internal::StopDone { manager, result, reason } => self.stop_done(*manager, result, reason),
@@ -894,6 +951,7 @@ impl Service {
             busy: self.running.is_some(),
             queued: self.queue.len(),
             log_tail: self.log_tail.clone(),
+            tasks_running: self.tasks.len(),
             ..StatusSnapshot::default()
         };
         match (&self.manager, &self.stopping) {
@@ -967,6 +1025,13 @@ impl Service {
 
     fn submit(&mut self, id: JobId, kind: JobKind) {
         self.out.send(Event::JobQueued(id));
+        if let JobKind::Describe { image, role, use_cache: true } = &kind {
+            // Described before: no request, no server needed.
+            if let Some(outcome) = DescriptionCache::open().lookup(image, *role) {
+                self.out.send(Event::DescribeDone { id, outcome: Box::new(outcome) });
+                return;
+            }
+        }
         self.queue.push_back(QueuedJob { id, kind, phase: None });
         // Decide on a fresh state: the server may have gone away since the last refresh.
         if self.running.is_none() && self.start_wait.is_none() && self.manager.is_some() {
@@ -1134,8 +1199,49 @@ impl Service {
 
     // --- server start / stop --------------------------------------------------------------
 
+    // --- downloads / imports --------------------------------------------------------------
+
+    /// Start a task on its own thread (refused while another one has the same target files).
+    fn run_task(&mut self, id: JobId, task: RuntimeTask) {
+        let targets = task.targets(&self.config);
+        if let Some(other) = self.tasks.iter().find(|t| t.targets.iter().any(|p| targets.contains(p))) {
+            let error = format!("{} is already running - wait for it or cancel it", other.title);
+            self.out.send(Event::TaskFailed { id, error });
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let title = task.title();
+        let ctx =
+            TaskContext { id, task, config: self.config.clone(), cancel: Arc::clone(&cancel), out: self.out.clone() };
+        let done = self.internal_tx.clone();
+        match thread::Builder::new().name(format!("bh3-task-{id}")).spawn(move || task_thread(ctx, done)) {
+            Ok(_) => self.tasks.push(RunningTask { id, cancel, title, targets }),
+            Err(e) => self.out.send(Event::TaskFailed { id, error: format!("Could not start the task thread: {e}") }),
+        }
+        self.dirty = true;
+    }
+
+    /// The running task that writes the files of the chosen install (Bonsai must not start then).
+    fn task_replacing_install(&self) -> Option<&RunningTask> {
+        let install = self.manager.as_ref().map(ServerManager::install)?;
+        let files: Vec<&std::path::Path> = install
+            .server_exe
+            .iter()
+            .chain(install.models.iter())
+            .chain(install.mmproj.iter())
+            .map(|p| p.as_path())
+            .collect();
+        self.tasks.iter().find(|t| runtime::touches(&t.targets, &files))
+    }
+
     /// Spawn the launcher (non-blocking). The error is ready to show.
     fn launch(&mut self, force: bool) -> Result<(), String> {
+        if let Some(task) = self.task_replacing_install() {
+            return Err(format!(
+                "Not starting Bonsai: its files are being replaced ({}) - wait until it is done or cancel it",
+                task.title
+            ));
+        }
         let Some(usable) = self.manager.as_ref().map(|m| m.install().is_usable()) else {
             return Err("Bonsai is still stopping - try again in a moment".to_string());
         };
@@ -1344,6 +1450,10 @@ impl Service {
         self.start_wait = None;
         self.start_after_stop = false;
         self.cancel_running();
+        // Downloads keep their `.part` files and resume next time.
+        for task in &self.tasks {
+            task.cancel.store(true, Ordering::SeqCst);
+        }
 
         // Let the cancelled job say goodbye and a stop in progress hand the manager back.
         let begun = Instant::now();
@@ -1406,10 +1516,19 @@ fn run_job(ctx: &JobContext) -> Event {
     let id = ctx.id;
     let out = &ctx.out;
     out.send(Event::JobPhase { id, phase: phase::PROMPT.to_string() });
+    let describe_params = describe::params();
+    let mut model = String::new();
     let (messages, params): (Cow<'_, [ChatMessage]>, &GenParams) = match &ctx.kind {
         // Loaded per job so Library edits apply to the next prompt.
         JobKind::Write(job) => (Cow::Owned(writer::build_messages(&Library::load(), job)), &job.params),
         JobKind::Chat { messages, params } => (Cow::Borrowed(messages.as_slice()), params),
+        JobKind::Describe { image, role, .. } => match describe_request(&ctx.client, image, *role) {
+            Ok((messages, name)) => {
+                model = name;
+                (Cow::Owned(messages), &describe_params)
+            }
+            Err(e) => return Event::JobFailed { id, error: format!("{e:#}") },
+        },
     };
 
     let mut batcher = DeltaBatcher::new(DELTA_EVERY);
@@ -1447,12 +1566,25 @@ fn run_job(ctx: &JobContext) -> Event {
         Err(_) if cancelled => Event::JobCancelled(id),
         Err(e) => Event::JobFailed { id, error: format!("Request to Bonsai failed: {e:#}") },
         Ok(result) if result.cancelled => Event::JobCancelled(id),
-        Ok(result) => finish_job(id, &ctx.kind, result),
+        Ok(result) => finish_job(id, &ctx.kind, result, &model),
     }
 }
 
-/// Final event of a completed request.
-fn finish_job(id: JobId, kind: &JobKind, result: ChatResult) -> Event {
+/// The messages of a describe job and the model name, after checking that the server can see
+/// pictures (`/props`) and reading the picture.
+fn describe_request(
+    client: &BonsaiClient,
+    image: &std::path::Path,
+    role: crate::request::RefRole,
+) -> anyhow::Result<(Vec<ChatMessage>, String)> {
+    let props = client.props()?;
+    describe::check_vision(&props)?;
+    let picture = ImageAttachment::from_file(image)?;
+    Ok((describe::messages(picture, role), props.model_name))
+}
+
+/// Final event of a completed request (`model`: the server's model, for describe jobs).
+fn finish_job(id: JobId, kind: &JobKind, result: ChatResult, model: &str) -> Event {
     match kind {
         JobKind::Write(job) => {
             // Checked before `finish` so an empty answer is not saved to history.
@@ -1463,7 +1595,46 @@ fn finish_job(id: JobId, kind: &JobKind, result: ChatResult) -> Event {
             }
         }
         JobKind::Chat { .. } => Event::ChatDone { id, result: Box::new(result) },
+        JobKind::Describe { image, role, .. } => match describe::finish(image, *role, &result, model) {
+            Ok(outcome) => {
+                if let Err(e) = DescriptionCache::open().store(&outcome) {
+                    eprintln!("describe cache: {e:#}");
+                }
+                Event::DescribeDone { id, outcome: Box::new(outcome) }
+            }
+            Err(e) => Event::JobFailed { id, error: format!("{e:#}") },
+        },
     }
+}
+
+/// Everything a task thread needs.
+struct TaskContext {
+    id: JobId,
+    task: RuntimeTask,
+    config: AppConfig,
+    cancel: Arc<AtomicBool>,
+    out: Outbox,
+}
+
+/// Task thread body: run the task with progress events, send its final event, tell the control thread.
+fn task_thread(ctx: TaskContext, done: Sender<Internal>) {
+    let id = ctx.id;
+    let out = ctx.out.clone();
+    let ran = panic::catch_unwind(AssertUnwindSafe(|| {
+        runtime::run_task(&ctx.task, &ctx.config, &ctx.cancel, &mut |p| {
+            out.send(Event::TaskProgress { id, progress: p.clone() })
+        })
+    }));
+    let terminal = match ran {
+        Ok(Ok(outcome)) => Event::TaskDone { id, outcome: Box::new(outcome) },
+        Ok(Err(e)) if e.downcast_ref::<runtime::Cancelled>().is_some() || ctx.cancel.load(Ordering::SeqCst) => {
+            Event::TaskCancelled(id)
+        }
+        Ok(Err(e)) => Event::TaskFailed { id, error: format!("{}: {e:#}", ctx.task.title()) },
+        Err(payload) => Event::TaskFailed { id, error: format!("internal error: {}", panic_message(payload)) },
+    };
+    ctx.out.send(terminal);
+    let _ = done.send(Internal::TaskFinished(id));
 }
 
 /// Answers `/tokenize` requests in order until the control thread drops its sender.
@@ -1756,7 +1927,40 @@ mod tests {
             server_exe: Some(file("bin/cuda/llama-server.exe")),
             models: vec![file("models/bonsai2-gguf/27B/Fake-Bonsai-2-27B-PTQ1_0.gguf")],
             mmproj: Some(file("models/bonsai2-gguf/27B/Fake-Bonsai-2-27B-mmproj-Q8_0.gguf")),
+            ..BonsaiInstall::default()
         }
+    }
+
+    /// An import on the task thread: progress, then `TaskDone`. Nothing is ever launched (dead
+    /// URL, fake files, no network).
+    #[test]
+    fn tasks_run_on_their_own_thread() {
+        let dir = std::env::temp_dir().join(format!("bh3-service-task-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let demo = dir.join("demo");
+        let install = fake_install(&demo);
+        let model = install.models[0].clone();
+        std::fs::write(&model, vec![7u8; 3 * 1024 * 1024]).expect("model");
+        let runtime_cfg = crate::config::RuntimeConfig { dir: Some(dir.join("rt")), ..Default::default() };
+        let cfg =
+            AppConfig { server_url: DEAD_URL.into(), auto_start: false, runtime: runtime_cfg, ..AppConfig::default() };
+        let svc = spawn(cfg, Arc::new(|| {}));
+        let mut ev = Events::new(&svc);
+        svc.send(Command::RunTask {
+            id: 9,
+            task: RuntimeTask::Import { dir: demo.clone(), mode: runtime::ImportMode::Copy },
+        });
+        let done = ev.wait_for(Duration::from_secs(30), |e| {
+            matches!(e, Event::TaskDone { id: 9, .. } | Event::TaskFailed { id: 9, .. })
+        });
+        let Some(Event::TaskDone { outcome, .. }) = done else { panic!("no TaskDone: {done:?}") };
+        let copied = outcome.model.clone().expect("model copied");
+        assert!(copied.is_file());
+        assert!(ev.saw(|e| matches!(e, Event::TaskProgress { id: 9, progress } if progress.files > 0)));
+
+        svc.send(Command::Shutdown);
+        assert!(svc.wait_shutdown(Duration::from_secs(15)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1766,8 +1970,14 @@ mod tests {
         let mut ev = Events::new(&svc);
         svc.send(Command::CountTokens { id: 5, text: "ignored: the server is not ready".into() });
         svc.send(Command::Submit { id: 1, kind: chat_job("hi", 8) });
+        // A re-describe (no cache) queues like any job.
+        let describe =
+            JobKind::Describe { image: "missing.png".into(), role: crate::request::RefRole::Place, use_cache: false };
+        svc.send(Command::Submit { id: 2, kind: describe });
         let failed = ev.wait_for(Duration::from_secs(15), |e| matches!(e, Event::JobFailed { id: 1, .. }));
         assert_eq!(failed, Some(Event::JobFailed { id: 1, error: NO_INSTALL.to_string() }), "{:#?}", ev.job_events());
+        let failed = ev.wait_for(Duration::from_secs(15), |e| matches!(e, Event::JobFailed { id: 2, .. }));
+        assert_eq!(failed, Some(Event::JobFailed { id: 2, error: NO_INSTALL.to_string() }), "{:#?}", ev.job_events());
         assert!(ev.saw(|e| *e == Event::JobQueued(1)));
         let idle = ev.wait_for(Duration::from_secs(5), |e| matches!(e, Event::Status(s) if s.queued == 0));
         let Some(Event::Status(status)) = idle else { panic!("no status after the failure") };

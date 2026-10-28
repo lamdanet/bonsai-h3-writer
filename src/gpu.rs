@@ -309,7 +309,7 @@ fn exe_file_name(path: &str) -> String {
 }
 
 /// `nvidia-smi` on PATH first, then the usual install locations.
-fn nvidia_smi_candidates() -> Vec<PathBuf> {
+pub(crate) fn nvidia_smi_candidates() -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from("nvidia-smi")];
     #[cfg(windows)]
     {

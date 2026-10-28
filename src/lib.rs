@@ -8,6 +8,7 @@
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod describe;
 pub mod gen;
 pub mod gpu;
 pub mod history;
@@ -15,6 +16,7 @@ pub mod lengths;
 pub mod library;
 pub mod lint;
 pub mod request;
+pub mod runtime;
 pub mod server;
 pub mod service;
 pub mod writer;

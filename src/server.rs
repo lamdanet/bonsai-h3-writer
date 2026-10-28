@@ -24,6 +24,16 @@
 //! (`BONSAI_IMAGE_MAX_TOKENS`, else 1024 unless the build is CUDA/HIP). Other `BONSAI_*` variables
 //! are named in the log as ignored.
 //!
+//! The app's own runtime ([`crate::config::RuntimeConfig`], see [`crate::runtime`]) needs no
+//! Bonsai-demo folder: [`BonsaiInstall::from_runtime`] describes its llama-server.exe, model and
+//! projector (used where they are), and the start is always direct, with the flags
+//! start_llama_server.ps1 passes for a Bonsai 2 model: the above plus its sampling defaults and
+//! `--webui-config-file` when `webui-config.json` was imported. [`install_from_config`] picks the
+//! runtime when it has a model, else `bonsai_dir`. Before such a start the Visual C++ runtime the
+//! server build needs is checked ([`crate::runtime::missing_system_dlls`]).
+//! `extra_args` from the settings go last on llama-server's command line (through the launcher
+//! script's `@args` when it is used).
+//!
 //! Stop = kill our powershell child's process tree and the `llama-server.exe` that listens on the
 //! server URL's port (`netstat -ano`, image name checked with `tasklist`), also one started by
 //! start_bonsai.bat. Other llama-server processes (another port, another app) are never touched.
@@ -111,6 +121,16 @@ pub struct BonsaiInstall {
     pub models: Vec<PathBuf>,
     /// First `*mmproj*.gguf` under `models\**`.
     pub mmproj: Option<PathBuf>,
+    /// The app's own runtime ([`from_runtime`](Self::from_runtime)), not a Bonsai-demo folder:
+    /// `root` is the server's folder, `models` holds the one configured model.
+    #[serde(default)]
+    pub runtime: bool,
+    /// `--webui-config-file` for a runtime start (`webui-config.json` in the runtime folder).
+    #[serde(default)]
+    pub webui_config: Option<PathBuf>,
+    /// DLLs the runtime's server build needs that this PC lacks (e.g. the Visual C++ runtime).
+    #[serde(default)]
+    pub missing_dlls: Vec<String>,
 }
 
 impl BonsaiInstall {
@@ -157,7 +177,7 @@ impl BonsaiInstall {
             }
         }
 
-        let mut install = Self { root, launcher_ps1, launcher_bat, server_exe, models, mmproj: None };
+        let mut install = Self { root, launcher_ps1, launcher_bat, server_exe, models, ..Self::default() };
         let model_dir = install.primary_model().and_then(|m| m.parent()).map(Path::to_path_buf);
         install.mmproj = mmprojs
             .iter()
@@ -170,6 +190,35 @@ impl BonsaiInstall {
         Ok(install)
     }
 
+    /// The app's own runtime from the settings (`cfg.runtime`): the configured model and
+    /// projector where they are, and llama-server.exe from `runtime.server_exe`, else the first
+    /// server build in the app's storage, else the one of `bonsai_dir`. Never fails: missing
+    /// files are listed by [`problems`](Self::problems).
+    pub fn from_runtime(cfg: &AppConfig) -> Self {
+        let rt = &cfg.runtime;
+        let server_exe = rt
+            .server_exe
+            .clone()
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| crate::runtime::installed_builds(cfg).into_iter().next().map(|b| b.exe))
+            .or_else(|| cfg.bonsai_dir.as_deref().and_then(|d| Self::detect(d).ok()).and_then(|i| i.server_exe));
+        let runtime_dir = crate::runtime::runtime_dir(cfg);
+        let root = server_exe.as_ref().and_then(|e| e.parent()).map_or_else(|| runtime_dir.clone(), Path::to_path_buf);
+        let missing_dlls =
+            server_exe.as_deref().filter(|e| e.is_file()).map(crate::runtime::missing_system_dlls).unwrap_or_default();
+        Self {
+            root,
+            launcher_ps1: None,
+            launcher_bat: None,
+            server_exe,
+            models: rt.model.iter().cloned().collect(),
+            mmproj: rt.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
+            runtime: true,
+            webui_config: Some(runtime_dir.join(crate::runtime::WEBUI_CONFIG_FILE)).filter(|p| p.is_file()),
+            missing_dlls,
+        }
+    }
+
     /// True when the app can start the server: llama-server.exe and a model are present (the
     /// launcher script is used when it exists, otherwise the exe is started directly).
     pub fn is_usable(&self) -> bool {
@@ -180,6 +229,22 @@ impl BonsaiInstall {
     /// then also a missing launcher), no model.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if self.runtime {
+            match &self.server_exe {
+                None => out.push(
+                    "No llama-server build yet - download one (Bonsai > Models > Server build, or `bh3 runtime download`)"
+                        .to_string(),
+                ),
+                Some(exe) if !exe.is_file() => out.push(format!("llama-server.exe not found: {}", exe.display())),
+                Some(_) => out.extend(crate::runtime::missing_dlls_message(&self.missing_dlls)),
+            }
+            match self.models.first() {
+                None => out.push("No model chosen (Bonsai > Models, or `bh3 models use <file.gguf>`)".to_string()),
+                Some(model) if !model.is_file() => out.push(format!("Model file not found: {}", model.display())),
+                Some(_) => {}
+            }
+            return out;
+        }
         if self.server_exe.is_none() {
             if self.launcher_ps1.is_none() {
                 out.push(r"Launcher scripts\start_llama_server.ps1 not found".to_string());
@@ -199,6 +264,18 @@ impl BonsaiInstall {
     /// no model where the launcher looks by default).
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if self.runtime {
+            match &self.mmproj {
+                None if !self.models.is_empty() => {
+                    out.push("No vision projector (*mmproj*.gguf) chosen - image input is disabled".to_string())
+                }
+                Some(p) if !p.is_file() => {
+                    out.push(format!("Vision projector not found ({}) - image input is disabled", p.display()))
+                }
+                _ => {}
+            }
+            return out;
+        }
         if self.launcher_ps1.is_none() && self.server_exe.is_some() {
             out.push(
                 r"scripts\start_llama_server.ps1 not found - llama-server.exe is started directly with default flags"
@@ -237,12 +314,11 @@ impl BonsaiInstall {
     /// `local build`.
     pub fn backend(&self) -> Option<&'static str> {
         let exe = self.server_exe.as_ref()?;
-        let dir = exe.parent().map(file_name_lower).unwrap_or_default();
-        Some(match dir.as_str() {
-            "cuda" => "CUDA",
-            "hip" => "ROCm (HIP)",
-            "vulkan" => "Vulkan",
-            "cpu" => "CPU",
+        Some(match crate::runtime::build_kind(exe) {
+            Some("cuda") => "CUDA",
+            Some("hip") => "ROCm (HIP)",
+            Some("vulkan") => "Vulkan",
+            Some("cpu") => "CPU",
             _ => "local build",
         })
     }
@@ -252,6 +328,9 @@ impl BonsaiInstall {
         const OK: &str = "✔";
         const BAD: &str = "❌";
         const WARN: &str = "⚠";
+        if self.runtime {
+            return self.runtime_summary();
+        }
         let mut out = vec![format!("Bonsai folder: {}", self.root.display())];
         out.push(match &self.launcher_ps1 {
             Some(p) => format!("{OK} Launcher: {}", self.rel(p)),
@@ -298,6 +377,39 @@ impl BonsaiInstall {
         out.join("\n")
     }
 
+    /// [`summary`](Self::summary) of the app's own runtime.
+    fn runtime_summary(&self) -> String {
+        const OK: &str = "✔";
+        const BAD: &str = "❌";
+        const WARN: &str = "⚠";
+        let sized = |p: &Path| match std::fs::metadata(p) {
+            Ok(md) => format!("{} ({})", p.display(), fmt_bytes(md.len())),
+            Err(_) => format!("{} (not found)", p.display()),
+        };
+        let mut out = vec!["App runtime (no Bonsai-demo folder needed; files are used where they are)".to_string()];
+        out.push(match &self.server_exe {
+            Some(p) if p.is_file() => format!("{OK} Server: {} ({})", p.display(), self.backend().unwrap_or("?")),
+            Some(p) => format!("{BAD} Server: {} not found", p.display()),
+            None => format!("{BAD} Server: no llama-server build yet (`bh3 runtime download`)"),
+        });
+        out.push(match self.models.first() {
+            Some(m) => format!("{} Model: {}", if m.is_file() { OK } else { BAD }, sized(m)),
+            None => format!("{BAD} Model: none chosen (`bh3 models use <file.gguf>`)"),
+        });
+        out.push(match &self.mmproj {
+            Some(p) if p.is_file() => format!("{OK} Vision projector: {}", sized(p)),
+            Some(p) => format!("{WARN} Vision projector: {} not found (image input disabled)", p.display()),
+            None => format!("{WARN} Vision projector: none (image input disabled)"),
+        });
+        let problems = self.problems();
+        if problems.is_empty() {
+            out.push("Ready: Bonsai can be started from these files.".to_string());
+        } else {
+            out.push(format!("Not usable: {}", problems.join("; ")));
+        }
+        out.join("\n")
+    }
+
     /// `models\bonsai2-gguf\27B` holds a `*-PQ2_0.gguf` or `*-PTQ1_0.gguf` (what the launcher loads
     /// with its default env).
     fn has_launcher_default_model(&self) -> bool {
@@ -309,6 +421,16 @@ impl BonsaiInstall {
     fn rel(&self, path: &Path) -> String {
         path.strip_prefix(&self.root).unwrap_or(path).display().to_string()
     }
+}
+
+/// The install the settings choose: the app's own runtime when it has a model
+/// ([`BonsaiInstall::from_runtime`]), else the detected `bonsai_dir` (`None` when neither is set
+/// or the folder is not a Bonsai-demo folder).
+pub fn install_from_config(cfg: &AppConfig) -> Option<BonsaiInstall> {
+    if cfg.runtime.is_active() {
+        return Some(BonsaiInstall::from_runtime(cfg));
+    }
+    cfg.bonsai_dir.as_deref().filter(|d| !d.as_os_str().is_empty()).and_then(|d| BonsaiInstall::detect(d).ok())
 }
 
 /// Existing folders that are likely Bonsai installs (`D:\Bonsai-demo`, `C:\Bonsai-demo`,
@@ -414,11 +536,18 @@ pub struct StartOptions {
     pub force: bool,
     /// VRAM (MB) used by other programs above which a non-forced start is refused (0 = never refuse).
     pub vram_busy_mb: u32,
+    /// Extra llama-server arguments (`AppConfig::extra_args`), appended last.
+    pub extra_args: Vec<String>,
 }
 
 impl StartOptions {
     pub fn from_config(cfg: &AppConfig) -> Self {
-        Self { env: cfg.launcher_env(), force: false, vram_busy_mb: cfg.vram_busy_mb }
+        Self {
+            env: cfg.launcher_env(),
+            force: false,
+            vram_busy_mb: cfg.vram_busy_mb,
+            extra_args: cfg.extra_server_args(),
+        }
     }
 }
 
@@ -579,9 +708,15 @@ impl ServerManager {
             self.child = None;
         }
         let root = self.install.root.clone();
-        // detect's message names the folder and the reason; no extra context layer, so a plain
-        // `{}` display still shows why.
-        self.install = BonsaiInstall::detect(&root)?;
+        if self.install.runtime {
+            // The files may have changed since (a download, the VC++ runtime installed).
+            let exe = self.install.server_exe.clone().filter(|e| e.is_file());
+            self.install.missing_dlls = exe.as_deref().map(crate::runtime::missing_system_dlls).unwrap_or_default();
+        } else {
+            // detect's message names the folder and the reason; no extra context layer, so a plain
+            // `{}` display still shows why.
+            self.install = BonsaiInstall::detect(&root)?;
+        }
         let problems = self.install.problems();
         if !problems.is_empty() {
             bail!("Bonsai cannot be started from {}: {}", root.display(), problems.join("; "));
@@ -688,14 +823,20 @@ impl ServerManager {
             let program = if cfg!(windows) { "powershell.exe" } else { "pwsh" };
             let mut cmd = Command::new(program);
             cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(ps1).current_dir(root);
+            // The launcher passes its own arguments on to llama-server (`@args`).
+            cmd.args(&opts.extra_args);
             cmd.envs(opts.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-            let shown = format!("{program} -NoProfile -ExecutionPolicy Bypass -File \"{}\"", ps1.display());
+            let mut shown = format!("{program} -NoProfile -ExecutionPolicy Bypass -File \"{}\"", ps1.display());
+            for arg in &opts.extra_args {
+                shown.push(' ');
+                shown.push_str(&quote_for_log(OsStr::new(arg)));
+            }
             return Ok(Launch { cmd, shown, direct: false, notes: Vec::new() });
         }
 
         let exe = self.install.server_exe.as_ref().context("llama-server.exe not found")?;
         let model = self.install.primary_model().context("no model (*.gguf) found under models")?;
-        let build = exe.parent().map(file_name_lower).unwrap_or_default();
+        let build = crate::runtime::build_kind(exe).unwrap_or_default();
         let is_cpu_build = build == "cpu";
         let kv4 = env_value(opts, "BONSAI_KV4").is_some_and(|v| v.trim() == "1");
         let settings = DirectLaunch {
@@ -718,8 +859,13 @@ impl ServerManager {
             // Like the launcher: capped unless the CUDA/HIP build runs; 0 = no cap.
             image_max_tokens: match env_value(opts, "BONSAI_IMAGE_MAX_TOKENS").map(|v| v.trim().to_string()) {
                 Some(v) if !v.is_empty() => (v != "0").then_some(v),
-                _ => (!matches!(build.as_str(), "cuda" | "hip")).then(|| DIRECT_IMAGE_MAX_TOKENS.to_string()),
+                _ => (!matches!(build, "cuda" | "hip")).then(|| DIRECT_IMAGE_MAX_TOKENS.to_string()),
             },
+            // The launcher's Bonsai 2 defaults; a Bonsai-demo folder without its launcher keeps the
+            // essential flags only.
+            sampling: if self.install.runtime { crate::runtime::launcher_sampling(model) } else { Vec::new() },
+            webui_config: self.install.webui_config.as_deref().filter(|_| self.install.runtime),
+            extra_args: opts.extra_args.clone(),
         };
         let args = direct_args(&settings);
         let mut cmd = Command::new(exe);
@@ -1519,6 +1665,12 @@ struct DirectLaunch<'a> {
     kv_bias: Option<PathBuf>,
     /// `--image-max-tokens` (with a vision projector only).
     image_max_tokens: Option<String>,
+    /// Sampling defaults, before `--jinja` like the launcher.
+    sampling: Vec<&'static str>,
+    /// `--webui-config-file`.
+    webui_config: Option<&'a Path>,
+    /// The user's extra arguments, last.
+    extra_args: Vec<String>,
 }
 
 /// Image-token cap of a direct start on non-CUDA/HIP builds (the launcher's default).
@@ -1527,9 +1679,10 @@ const DIRECT_IMAGE_MAX_TOKENS: &str = "1024";
 const DIRECT_ENV: [&str; 5] =
     ["BONSAI_CTX", "BONSAI_NGL", "BONSAI_MMPROJ_CPU", "BONSAI_KV4", "BONSAI_IMAGE_MAX_TOKENS"];
 
-/// `-m <model> --host 127.0.0.1 --port <port> -ngl <ngl> -fa on -c <ctx> --jinja [--mmproj <mmproj>
-/// [--no-mmproj-offload]] [--cache-type-k q4_0 --cache-type-v q4_0 [--kv-mean-center <bias>]]
-/// [--image-max-tokens <n>]`, like the launcher.
+/// `-m <model> --host 127.0.0.1 --port <port> -ngl <ngl> -fa on -c <ctx> [<sampling>] --jinja
+/// [--mmproj <mmproj> [--no-mmproj-offload]] [--cache-type-k q4_0 --cache-type-v q4_0
+/// [--kv-mean-center <bias>]] [--image-max-tokens <n>] [--webui-config-file <json>] [<extra>]`,
+/// like the launcher.
 fn direct_args(d: &DirectLaunch<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "-m".into(),
@@ -1544,8 +1697,9 @@ fn direct_args(d: &DirectLaunch<'_>) -> Vec<OsString> {
         "on".into(),
         "-c".into(),
         d.ctx.clone().into(),
-        "--jinja".into(),
     ];
+    args.extend(d.sampling.iter().map(OsString::from));
+    args.push("--jinja".into());
     if let Some(mmproj) = d.mmproj {
         args.push("--mmproj".into());
         args.push(mmproj.as_os_str().to_owned());
@@ -1564,6 +1718,11 @@ fn direct_args(d: &DirectLaunch<'_>) -> Vec<OsString> {
         args.push("--image-max-tokens".into());
         args.push(tokens.into());
     }
+    if let Some(webui) = d.webui_config {
+        args.push("--webui-config-file".into());
+        args.push(webui.as_os_str().to_owned());
+    }
+    args.extend(d.extra_args.iter().map(OsString::from));
     args
 }
 
@@ -2178,6 +2337,9 @@ mod tests {
             kv4: false,
             kv_bias: None,
             image_max_tokens: None,
+            sampling: Vec::new(),
+            webui_config: None,
+            extra_args: Vec::new(),
         };
         let args: Vec<String> = direct_args(&d).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(
@@ -2266,6 +2428,67 @@ mod tests {
             uncapped.shown
         );
         assert!(uncapped.notes.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The app's own runtime: files where they are, a downloaded CUDA build, the launcher's flags
+    /// for a Bonsai 2 27B (sampling, --jinja, projector, web UI config) and the extra arguments.
+    #[test]
+    fn runtime_install_starts_directly_with_the_launcher_flags() {
+        let root = temp_dir("runtime");
+        let exe = touch_file(&root, &format!("rt/bin/prism-b10787-73bfe6c-cuda-13.3/{SERVER_EXE_NAME}"));
+        let model = touch_file(&root, "elsewhere/Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf");
+        let mmproj = touch_file(&root, "elsewhere/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf");
+        let webui = touch_file(&root, "rt/webui-config.json");
+        let runtime = crate::config::RuntimeConfig {
+            server_exe: Some(exe.clone()),
+            model: Some(model.clone()),
+            mmproj: Some(mmproj.clone()),
+            dir: Some(root.join("rt")),
+            ..Default::default()
+        };
+        let cfg = AppConfig { runtime, ctx_size: 16384, extra_args: "--threads 6".into(), ..AppConfig::default() };
+        let install = install_from_config(&cfg).unwrap();
+        assert!(install.runtime && install.launcher_ps1.is_none());
+        assert_eq!(install.backend(), Some("CUDA"));
+        assert!(install.is_usable(), "{:?}", install.problems());
+        assert!(install.warnings().is_empty(), "{:?}", install.warnings());
+        assert!(install.summary().contains("App runtime"), "{}", install.summary());
+        let mgr = ServerManager::with_log_path(install, "http://127.0.0.1:18080", root.join("x.log"));
+        let launch = mgr.launch_command(&StartOptions::from_config(&cfg)).unwrap();
+        assert!(launch.direct);
+        let args: Vec<String> = launch.cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let s = |p: &PathBuf| p.to_string_lossy().into_owned();
+        let mut want: Vec<String> = vec![
+            "-m".into(),
+            s(&model),
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            "18080".into(),
+            "-ngl".into(),
+            "99".into(),
+            "-fa".into(),
+            "on".into(),
+            "-c".into(),
+            "16384".into(),
+        ];
+        want.extend(["--temp", "1.0", "--top-p", "0.95", "--top-k", "20", "--min-p", "0.05"].map(String::from));
+        want.extend(["--jinja".to_string(), "--mmproj".to_string(), s(&mmproj)]);
+        want.extend(["--webui-config-file".to_string(), s(&webui), "--threads".to_string(), "6".to_string()]);
+        assert_eq!(args, want, "CUDA build: no image cap");
+
+        // Missing pieces are named; nothing set: no install.
+        let empty_rt = crate::config::RuntimeConfig {
+            model: Some(root.join("nope.gguf")),
+            dir: Some(root.join("empty-rt")),
+            ..Default::default()
+        };
+        let empty = BonsaiInstall::from_runtime(&AppConfig { runtime: empty_rt, ..AppConfig::default() });
+        let problems = empty.problems().join("; ");
+        assert!(problems.contains("No llama-server build") && problems.contains("Model file not found"), "{problems}");
+        assert!(!empty.is_usable());
+        assert_eq!(install_from_config(&AppConfig::default()), None);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2561,6 +2784,7 @@ mod tests {
             env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             force: true,
             vram_busy_mb: 0,
+            extra_args: Vec::new(),
         }
     }
 

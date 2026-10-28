@@ -19,6 +19,35 @@ pub struct EnvVar {
     pub value: String,
 }
 
+/// The app's own runtime: llama-server and model files that are started directly, without the
+/// Bonsai-demo folder. The paths may point anywhere (files are used where they are, e.g. straight
+/// into a Bonsai-demo folder) or into the app's storage (downloads and imports, see
+/// [`crate::runtime`]). A model set here takes precedence over `bonsai_dir`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// llama-server.exe to start. Unset: the newest server build in the app's storage, else the
+    /// one of `bonsai_dir`.
+    pub server_exe: Option<PathBuf>,
+    /// Model GGUF (set = the app's runtime is used instead of the Bonsai-demo launcher).
+    pub model: Option<PathBuf>,
+    /// Vision projector (`*mmproj*.gguf`); unset = no image input.
+    pub mmproj: Option<PathBuf>,
+    /// Storage for downloads and imports (`%LOCALAPPDATA%\BonsaiH3Writer\runtime` when unset).
+    pub dir: Option<PathBuf>,
+    /// Where models are stored (`<dir>\models` when unset), e.g. on another drive.
+    pub models_dir: Option<PathBuf>,
+    /// Hugging Face token for gated or private repos (else the `HF_TOKEN` environment variable).
+    pub hf_token: Option<String>,
+}
+
+impl RuntimeConfig {
+    /// A model is chosen: Bonsai starts from these files, not from `bonsai_dir`'s launcher.
+    pub fn is_active(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| !m.as_os_str().is_empty())
+    }
+}
+
 /// All persistent settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -44,6 +73,16 @@ pub struct AppConfig {
     pub extra_env: Vec<EnvVar>,
     /// Seconds to wait for the model to load.
     pub start_timeout_secs: u32,
+    /// The app's own runtime (model and server files started directly).
+    pub runtime: RuntimeConfig,
+    /// `BONSAI_NGL`: model layers on the GPU (`None` = all, 0 for the CPU build).
+    pub gpu_layers: Option<u32>,
+    /// `BONSAI_IMAGE_MAX_TOKENS`: image token cap (`None` = 1024 unless CUDA/HIP, 0 = no cap).
+    pub image_max_tokens: Option<u32>,
+    /// `BONSAI_KV4=1`: 4-bit (q4_0) KV cache, ~3.5x less context memory.
+    pub kv_cache_4bit: bool,
+    /// Extra llama-server arguments (`--threads 8 --alias "x"`), appended last.
+    pub extra_args: String,
     /// Defaults for prompt writing.
     pub writer_params: GenParams,
     /// Defaults for free chat.
@@ -54,6 +93,9 @@ pub struct AppConfig {
     pub default_duration: u32,
     /// Save every written prompt to the history folder.
     pub save_history: bool,
+    /// Write workspace: when a picture is picked for a reference, Bonsai describes it once
+    /// (`crate::describe`) into the empty description, so prompts are written from text.
+    pub auto_describe: bool,
     /// Show Bonsai's reasoning text when thinking is on.
     pub show_reasoning: bool,
     /// UI zoom factor.
@@ -77,11 +119,17 @@ impl Default for AppConfig {
             mmproj_cpu: false,
             extra_env: Vec::new(),
             start_timeout_secs: 300,
+            runtime: RuntimeConfig::default(),
+            gpu_layers: None,
+            image_max_tokens: None,
+            kv_cache_4bit: false,
+            extra_args: String::new(),
             writer_params: GenParams::prompt_writer(),
             chat_params: GenParams::chat(),
             last_mode: Mode::R2v,
             default_duration: 6,
             save_history: true,
+            auto_describe: true,
             show_reasoning: true,
             ui_scale: 1.0,
             accent: [232, 125, 13],
@@ -168,6 +216,11 @@ impl AppConfig {
         self.server_url.trim().trim_end_matches('/').to_string()
     }
 
+    /// [`extra_args`](Self::extra_args) split like a command line.
+    pub fn extra_server_args(&self) -> Vec<String> {
+        crate::runtime::split_args(&self.extra_args)
+    }
+
     /// Environment pairs for the launcher from the settings.
     pub fn launcher_env(&self) -> Vec<(String, String)> {
         let mut env = Vec::new();
@@ -176,6 +229,16 @@ impl AppConfig {
         }
         if self.mmproj_cpu {
             env.push(("BONSAI_MMPROJ_CPU".to_string(), "1".to_string()));
+        }
+        // The launcher's own names, so both the launcher script and a direct start read them.
+        if let Some(ngl) = self.gpu_layers {
+            env.push(("BONSAI_NGL".to_string(), ngl.to_string()));
+        }
+        if self.kv_cache_4bit {
+            env.push(("BONSAI_KV4".to_string(), "1".to_string()));
+        }
+        if let Some(cap) = self.image_max_tokens {
+            env.push(("BONSAI_IMAGE_MAX_TOKENS".to_string(), cap.to_string()));
         }
         env.extend(
             self.extra_env
@@ -239,6 +302,45 @@ mod tests {
         // A save afterwards replaces config.json; the copy stays.
         AppConfig::default().save_to(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runtime_settings_round_trip_and_old_files_load() {
+        let dir = std::env::temp_dir().join(format!("bh3-cfg-rt-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let cfg = AppConfig {
+            runtime: RuntimeConfig {
+                server_exe: Some(PathBuf::from(r"C:\rt\bin\b\llama-server.exe")),
+                model: Some(PathBuf::from(r"E:\models\M-PTQ1_0.gguf")),
+                mmproj: None,
+                dir: None,
+                models_dir: Some(PathBuf::from(r"E:\models")),
+                hf_token: Some("hf_x".into()),
+            },
+            gpu_layers: Some(40),
+            image_max_tokens: Some(0),
+            kv_cache_4bit: true,
+            extra_args: "--threads 8".into(),
+            ..AppConfig::default()
+        };
+        cfg.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap(), cfg);
+        assert!(cfg.runtime.is_active());
+        // A config of version 0.1.0 has none of these fields.
+        std::fs::write(&path, r#"{"bonsai_dir": "D:\\Bonsai-demo", "ctx_size": 16384}"#).unwrap();
+        let old = AppConfig::load_from(&path).unwrap();
+        assert_eq!(old.runtime, RuntimeConfig::default());
+        assert!(!old.runtime.is_active() && old.gpu_layers.is_none() && old.extra_args.is_empty());
+        assert_eq!(cfg.extra_server_args(), vec!["--threads".to_string(), "8".to_string()]);
+        assert_eq!(
+            cfg.launcher_env(),
+            vec![
+                ("BONSAI_NGL".to_string(), "40".to_string()),
+                ("BONSAI_KV4".to_string(), "1".to_string()),
+                ("BONSAI_IMAGE_MAX_TOKENS".to_string(), "0".to_string()),
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
