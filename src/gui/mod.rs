@@ -5,6 +5,7 @@ pub mod app;
 pub mod chat;
 pub mod history_ws;
 pub mod library_ws;
+pub mod models_ws;
 pub mod server_ws;
 pub mod settings;
 pub mod setup;

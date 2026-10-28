@@ -203,7 +203,10 @@ pub fn show(app: &mut AppState, ctx: &egui::Context) {
     let shown = st.category;
     commit_hidden_drafts(&mut st, app, Some(shown));
 
-    if app.config != before {
+    if app.config.runtime != before.runtime {
+        // A new model / server / folder: the service needs the install it gives.
+        app.apply_runtime();
+    } else if app.config != before {
         if ctx.input(|i| i.pointer.any_down()) {
             st.pending_save = true;
         } else {
@@ -481,6 +484,7 @@ fn swatch(ui: &mut Ui, rgb: [u8; 3], selected: bool) -> egui::Response {
 // --- Bonsai server ---------------------------------------------------------------------------
 
 fn server_page(ui: &mut Ui, st: &mut SettingsState, app: &mut AppState) {
+    runtime_panel(ui, app);
     widgets::panel(ui, "settings-folder", "Bonsai Folder", true, |ui| {
         widgets::prop_row(ui, "Folder", |ui| {
             let text = app.config.bonsai_dir.as_ref().map_or("Not chosen yet".to_string(), |d| d.display().to_string());
@@ -495,7 +499,11 @@ fn server_page(ui: &mut Ui, st: &mut SettingsState, app: &mut AppState) {
                 app.show_setup = true;
             }
         });
-        widgets::prop_row(ui, "Status", |ui| install_status(ui, app));
+        if !app.config.runtime.is_active() {
+            widgets::prop_row(ui, "Status", |ui| install_status(ui, app));
+        } else {
+            hint(ui, "Not used while a model is set above (Model and Server Files). Change... switches back to it.");
+        }
     });
 
     widgets::panel(ui, "settings-connection", "Connection", true, |ui| {
@@ -559,6 +567,54 @@ fn server_page(ui: &mut Ui, st: &mut SettingsState, app: &mut AppState) {
             ui.checkbox(&mut c.mmproj_cpu, "Run on the CPU")
                 .on_hover_text("BONSAI_MMPROJ_CPU=1: frees about 0.9 GB of VRAM; reading images gets slower");
         });
+        widgets::prop_row(ui, "GPU layers", |ui| {
+            let mut auto = c.gpu_layers.is_none();
+            if ui
+                .checkbox(&mut auto, "All")
+                .on_hover_text("BONSAI_NGL unset: every layer on the GPU (0 for the CPU build)")
+                .changed()
+            {
+                c.gpu_layers = if auto { None } else { Some(99) };
+            }
+            if let Some(ngl) = c.gpu_layers.as_mut() {
+                let drag =
+                    egui::DragValue::new(ngl).range(0..=999).speed(0.5).custom_formatter(|v, _| match v as u32 {
+                        0 => "0 - CPU only".to_string(),
+                        n => format!("{n} layers"),
+                    });
+                number_field(ui, drag, "BONSAI_NGL: layers on the GPU; fewer leave room for ComfyUI but answer slower");
+            }
+        });
+        widgets::prop_row(ui, "Image tokens", |ui| {
+            let mut auto = c.image_max_tokens.is_none();
+            let tip = "BONSAI_IMAGE_MAX_TOKENS unset: no cap with CUDA, 1024 tokens on Vulkan / CPU";
+            if ui.checkbox(&mut auto, "Auto").on_hover_text(tip).changed() {
+                c.image_max_tokens = if auto { None } else { Some(1024) };
+            }
+            if let Some(cap) = c.image_max_tokens.as_mut() {
+                let drag =
+                    egui::DragValue::new(cap).range(0..=8192).speed(8.0).custom_formatter(|v, _| match v as u32 {
+                        0 => "No cap - full detail".to_string(),
+                        n => format!("at most {n}"),
+                    });
+                number_field(ui, drag, "Big pictures are scaled down to about this many vision tokens (0 = no cap)");
+            }
+        });
+        widgets::prop_row(ui, "KV cache", |ui| {
+            ui.checkbox(&mut c.kv_cache_4bit, "4-bit (q4_0)").on_hover_text(
+                "BONSAI_KV4=1: ~3.5x less memory for the context, slightly slower; for long contexts on a tight GPU",
+            );
+        });
+        widgets::prop_row(ui, "Extra arguments", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut c.extra_args)
+                    .id_salt("bh3-settings-extra-args")
+                    .font(theme::mono(12.5))
+                    .hint_text("e.g. --threads 8")
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Added at the end of llama-server's command line (quotes group words)");
+        });
         widgets::prop_row(ui, "Start timeout", |ui| {
             let drag = egui::DragValue::new(&mut c.start_timeout_secs)
                 .range(30..=1800)
@@ -568,6 +624,111 @@ fn server_page(ui: &mut Ui, st: &mut SettingsState, app: &mut AppState) {
             number_field(ui, drag, "How long a prompt waits for the model to load before giving up");
         });
         widgets::prop_row(ui, "Environment", |ui| env_editor(ui, &mut c.extra_env));
+    });
+}
+
+/// "Model and Server Files": the app's own runtime (files used where they are) and its storage.
+fn runtime_panel(ui: &mut Ui, app: &mut AppState) {
+    widgets::panel(ui, "settings-runtime", "Model and Server Files", true, |ui| {
+        hint(
+            ui,
+            "Bonsai runs from these files without a Bonsai-demo folder; they stay where they are. A model set here \
+             is used instead of the Bonsai folder below.",
+        );
+        let rows: [(&str, &str, &[&str], u8); 3] = [
+            ("Model", "Choose the model (.gguf)", &["gguf"], 0),
+            ("Vision projector", "Choose the vision projector (*mmproj*.gguf)", &["gguf"], 1),
+            ("Server", "Choose llama-server.exe", &["exe"], 2),
+        ];
+        let mut picked: Option<(u8, Option<PathBuf>)> = None;
+        for (label, title, exts, which) in rows {
+            let rt = &app.config.runtime;
+            let value = match which {
+                0 => &rt.model,
+                1 => &rt.mmproj,
+                _ => &rt.server_exe,
+            };
+            let empty = match which {
+                0 => "None - the Bonsai folder is used",
+                1 => "None - image input off",
+                _ => "Automatic (a build in the app, else the Bonsai folder's)",
+            };
+            widgets::prop_row(ui, label, |ui| {
+                let text = value.as_ref().map_or(empty.to_string(), |p| p.display().to_string());
+                let browse = format!("{} Browse...", icons::FOLDER);
+                let browse_w = button_width(ui, &browse, 92.0);
+                let clear_w =
+                    if value.is_some() { button_width(ui, "✖", 26.0) + ui.spacing().item_spacing.x } else { 0.0 };
+                let width = ui.available_width() - browse_w - clear_w - ui.spacing().item_spacing.x;
+                path_field(ui, &text, width);
+                if ui.add(egui::Button::new(browse).min_size(egui::vec2(browse_w, 22.0))).clicked() {
+                    if let Some(path) = util::pick_file(title, label, exts, value.as_deref()) {
+                        picked = Some((which, Some(path)));
+                    }
+                }
+                let clear_size = egui::vec2(button_width(ui, "✖", 26.0), 22.0);
+                let clear = value.is_some()
+                    && ui.add(egui::Button::new("✖").min_size(clear_size)).on_hover_text("Clear").clicked();
+                if clear {
+                    picked = Some((which, None));
+                }
+            });
+        }
+        if let Some((which, path)) = picked {
+            let rt = &mut app.config.runtime;
+            match which {
+                0 => {
+                    // A new model brings the projector next to it.
+                    rt.mmproj = path.as_deref().and_then(bh3::runtime::pair_mmproj);
+                    rt.model = path;
+                }
+                1 => rt.mmproj = path,
+                _ => rt.server_exe = path,
+            }
+        }
+        if app.config.runtime.is_active() {
+            widgets::prop_row(ui, "Status", |ui| install_status(ui, app));
+        }
+        let models_dir = bh3::runtime::models_dir(&app.config);
+        widgets::prop_row(ui, "Models folder", |ui| {
+            let change = format!("{} Change...", icons::FOLDER);
+            let change_w = button_width(ui, &change, 92.0);
+            let width = ui.available_width() - change_w - ui.spacing().item_spacing.x;
+            path_field(ui, &models_dir.display().to_string(), width);
+            if ui
+                .add(egui::Button::new(change).min_size(egui::vec2(change_w, 22.0)))
+                .on_hover_text("Where downloads and imports of models go (e.g. another drive)")
+                .clicked()
+            {
+                if let Some(dir) = util::pick_folder("Choose the folder for models", Some(&models_dir)) {
+                    app.config.runtime.models_dir = Some(dir);
+                }
+            }
+        });
+        widgets::prop_row(ui, "Hugging Face token", |ui| {
+            let mut token = app.config.runtime.hf_token.clone().unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut token)
+                    .id_salt("bh3-settings-hf-token")
+                    .password(true)
+                    .hint_text("only for gated or private repos (else HF_TOKEN)")
+                    .desired_width(f32::INFINITY),
+            );
+            if r.changed() {
+                let token = token.trim().to_string();
+                app.config.runtime.hf_token = (!token.is_empty()).then_some(token);
+            }
+        });
+        widgets::prop_row(ui, "", |ui| {
+            if ui
+                .button(format!("{} Open Bonsai > Models", icons::LIBRARY))
+                .on_hover_text("Download, choose or delete models and server builds")
+                .clicked()
+            {
+                app.workspace = Workspace::Server;
+                app.server_ws.show_models();
+            }
+        });
     });
 }
 
@@ -746,6 +907,15 @@ fn writing_page(ui: &mut Ui, app: &mut AppState) {
             ui.checkbox(&mut c.save_history, "Save every written prompt")
                 .on_hover_text("Saved prompts are listed in the History workspace");
         });
+        widgets::prop_row(ui, "Pictures", |ui| {
+            ui.checkbox(&mut c.auto_describe, "Describe pictures automatically").on_hover_text(
+                "When you pick a picture for a reference with an empty description, Bonsai looks at it once and                  writes the description",
+            );
+        });
+        hint(
+            ui,
+            "Bonsai's vision input describes each picture once (~18 s, saved for next time); prompts are then              written from text, without ~1,100 picture tokens each time. Text you type is never replaced.",
+        );
     });
 }
 

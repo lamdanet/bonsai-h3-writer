@@ -150,7 +150,7 @@ fn right_segments(app: &AppState) -> Vec<Segment> {
         ServerState::Loading => (Palette::WARN, "Loading model..."),
         ServerState::Stopping => (Palette::WARN, "Stopping..."),
         ServerState::Failed(_) => (Palette::ERR, "Start failed"),
-        ServerState::Stopped if !st.install_ok => (Palette::ERR, "No Bonsai folder"),
+        ServerState::Stopped if !st.install_ok => (Palette::ERR, "Bonsai not set up"),
         ServerState::Stopped => (Color32::from_gray(110), "Bonsai off"),
     };
     let mut tip = match &st.state {
@@ -326,8 +326,15 @@ fn left_parts(app: &AppState) -> (Vec<Part>, Option<String>) {
         return (vec![Part::Text(text, Palette::ERR)], Some(format!("The last start failed: {e}")));
     }
     if !st.install_ok {
-        let text = format!("{} Choose the Bonsai folder: Bonsai > Change Bonsai folder...", widgets::icons::WARN);
-        let tip = "The app needs the Bonsai-demo folder (the one with start_bonsai.bat) to start Bonsai.";
+        let text = match &st.install {
+            Some(install) if install.runtime => format!(
+                "{} Bonsai is not ready: {}",
+                widgets::icons::WARN,
+                install.problems().first().cloned().unwrap_or_default()
+            ),
+            _ => format!("{} Set up Bonsai: Bonsai > Change Bonsai folder...", widgets::icons::WARN),
+        };
+        let tip = "The app needs a model file and llama-server (or a Bonsai-demo folder) to start Bonsai.";
         return (vec![Part::Text(text, Palette::WARN)], Some(tip.to_string()));
     }
     let mut parts = vec![Part::Text("Ready".to_string(), Palette::TEXT_DIM)];

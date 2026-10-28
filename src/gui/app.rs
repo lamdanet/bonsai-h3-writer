@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use bh3::config::AppConfig;
 use bh3::library::Library;
-use bh3::server::BonsaiInstall;
+use bh3::server::{self, BonsaiInstall};
 use bh3::service::{self, Command, Event, JobId, JobKind, ServiceHandle, StatusSnapshot};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText};
 
 use super::theme::{self, Palette};
 use super::widgets::{self, icons};
-use super::{chat, history_ws, library_ws, server_ws, settings, setup, statusbar, topbar, write};
+use super::{chat, history_ws, library_ws, models_ws, server_ws, settings, setup, statusbar, topbar, write};
 
 /// Area id of the toasts (a foreground layer that does not take Esc).
 const TOASTS_ID: &str = "bh3-toasts";
@@ -68,7 +68,7 @@ impl Workspace {
             "chat" => Some(Workspace::Chat),
             "library" => Some(Workspace::Library),
             "history" => Some(Workspace::History),
-            "server" | "bonsai" => Some(Workspace::Server),
+            "server" | "bonsai" | "models" => Some(Workspace::Server),
             "settings" => Some(Workspace::Settings),
             _ => None,
         }
@@ -122,6 +122,8 @@ pub struct AppState {
     pub history: history_ws::HistoryState,
     pub library_ws: library_ws::LibraryState,
     pub server_ws: server_ws::ServerWsState,
+    /// Downloads, imports and the Models area.
+    pub models: models_ws::ModelsState,
     /// What is happening right now, for the status bar (e.g. "Writing... 12 s"); workspaces set/clear it.
     pub activity: Option<String>,
     /// Speed/cache numbers of the last finished request (status bar).
@@ -142,18 +144,29 @@ impl AppState {
         self.next_job
     }
 
-    /// Send a job to the service; returns its id.
+    /// Send a job to the service; returns its id. Prompt and chat jobs count as work a close
+    /// would lose; a picture description does not (it is asked again next time).
     pub fn submit(&mut self, kind: JobKind) -> JobId {
         let id = self.new_job_id();
-        let chat = matches!(kind, JobKind::Chat { .. });
+        let tracked = match kind {
+            JobKind::Write(_) => Some(false),
+            JobKind::Chat { .. } => Some(true),
+            JobKind::Describe { .. } => None,
+        };
         self.service.send(Command::Submit { id, kind });
-        self.open_jobs.push((id, chat));
+        if let Some(chat) = tracked {
+            self.open_jobs.push((id, chat));
+        }
         id
     }
 
     /// What closing the window now would lose, one line each (empty: nothing).
     pub fn unsaved_work(&self) -> Vec<&'static str> {
-        close_losses(&self.open_jobs, self.library_ws.has_unsaved())
+        let mut losses = close_losses(&self.open_jobs, self.library_ws.has_unsaved());
+        if self.models.any_running() {
+            losses.push("A download or import is running: it stops (a download continues next time).");
+        }
+        losses
     }
 
     pub fn cancel(&self, id: JobId) {
@@ -178,12 +191,24 @@ impl AppState {
     }
 
     /// Check `dir`, store it as the Bonsai folder and tell the service.
+    /// Choosing a folder switches the app's own runtime off (its model is no longer used).
     pub fn set_bonsai_dir(&mut self, dir: PathBuf) -> anyhow::Result<BonsaiInstall> {
         let install = BonsaiInstall::detect(&dir)?;
         self.config.bonsai_dir = Some(dir);
+        self.config.runtime.model = None;
+        self.config.runtime.mmproj = None;
         self.save_config();
         self.service.send(Command::SetInstall(Some(install.clone())));
         Ok(install)
+    }
+
+    /// Save the config and give the service the install it now chooses (after a change of
+    /// `config.runtime`: model, projector or server files).
+    pub fn apply_runtime(&mut self) -> Option<BonsaiInstall> {
+        self.save_config();
+        let install = server::install_from_config(&self.config);
+        self.service.send(Command::SetInstall(install.clone()));
+        install
     }
 
     pub fn bonsai_ready(&self) -> bool {
@@ -225,7 +250,10 @@ fn close_losses(open_jobs: &[(JobId, bool)], library_unsaved: bool) -> Vec<&'sta
 /// The job an event ends (its last event).
 fn ended_job(ev: &Event) -> Option<JobId> {
     match ev {
-        Event::WriteDone { id, .. } | Event::ChatDone { id, .. } | Event::JobFailed { id, .. } => Some(*id),
+        Event::WriteDone { id, .. }
+        | Event::ChatDone { id, .. }
+        | Event::DescribeDone { id, .. }
+        | Event::JobFailed { id, .. } => Some(*id),
         Event::JobCancelled(id) => Some(*id),
         _ => None,
     }
@@ -266,7 +294,7 @@ impl BonsaiApp {
         let repaint_ctx = cc.egui_ctx.clone();
         let service = service::spawn(config.clone(), Arc::new(move || repaint_ctx.request_repaint()));
 
-        let install = config.bonsai_dir.as_deref().and_then(|d| BonsaiInstall::detect(d).ok());
+        let install = server::install_from_config(&config);
         let show_setup = install.as_ref().map(|i| !i.is_usable()).unwrap_or(true);
         service.send(Command::SetInstall(install));
 
@@ -286,6 +314,7 @@ impl BonsaiApp {
             history: history_ws::HistoryState::default(),
             library_ws: library_ws::LibraryState::default(),
             server_ws: server_ws::ServerWsState::default(),
+            models: models_ws::ModelsState::default(),
             activity: None,
             last_timings: None,
             esc_free: true,
@@ -300,8 +329,13 @@ impl BonsaiApp {
         // The Write draft of the last session (or the demo) before any workspace is shown.
         write::init(&mut state);
 
-        if let Some(ws) = std::env::var("BH3_WORKSPACE").ok().and_then(|w| Workspace::from_name(&w)) {
-            state.workspace = ws;
+        if let Ok(name) = std::env::var("BH3_WORKSPACE") {
+            if let Some(ws) = Workspace::from_name(&name) {
+                state.workspace = ws;
+            }
+            if name.trim().eq_ignore_ascii_case("models") {
+                state.server_ws.show_models();
+            }
         }
         match std::env::var("BH3_SETUP").as_deref() {
             Ok("1") => state.show_setup = true,
@@ -332,6 +366,7 @@ impl BonsaiApp {
                     library_ws::on_event(&mut self.state, &other);
                     history_ws::on_event(&mut self.state, &other);
                     server_ws::on_event(&mut self.state, &other);
+                    models_ws::on_event(&mut self.state, &other);
                 }
             }
         }
@@ -521,6 +556,7 @@ impl eframe::App for BonsaiApp {
         if self.state.show_setup {
             setup::show(&mut self.state, ctx);
         }
+        models_ws::delete_dialog(&mut self.state, ctx);
         self.guard_close(ctx, dialog_keys);
         self.show_toasts(ctx);
         self.handle_screenshot(ctx);

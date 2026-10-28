@@ -58,12 +58,13 @@ pub fn pick_folder(title: &str, start: Option<&Path>) -> Option<PathBuf> {
     dialog.pick_folder()
 }
 
-/// Native "open image" dialog (one file).
-pub fn pick_image(title: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
-        .pick_file()
+/// Native "open file" dialog for one file of the given extensions.
+pub fn pick_file(title: &str, filter: &str, extensions: &[&str], start: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title).add_filter(filter, extensions);
+    if let Some(dir) = start.and_then(|p| if p.is_dir() { Some(p) } else { p.parent() }).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_file()
 }
 
 /// Native "open images" dialog (several files).

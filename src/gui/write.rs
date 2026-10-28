@@ -9,13 +9,19 @@
 //! Replacing the work on screen (Open in Write, a new answer over an edited prompt) offers Undo
 //! for a few seconds. The form, the request text and the prompt survive a restart
 //! (`draft.json` in the config folder). `BH3_DEMO=1` fills the form and the prompt instead
-//! (screenshots; no draft is read or saved).
+//! (screenshots; no draft is read or saved, and no picture is described).
+//!
+//! Pictures: a picture picked for a reference is described once by Bonsai's vision input
+//! (`JobKind::Describe`, setting `auto_describe`) into its empty description, so the prompt is
+//! written from text. Text the user typed is never overwritten: such a card offers "Describe with
+//! Bonsai" instead, and a description that arrives after the user typed is offered, not written.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bh3::client::Timings;
 use bh3::config::AppConfig;
+use bh3::describe;
 use bh3::gen::{GenParams, Mode, ThinkingMode};
 use bh3::history::HistoryEntry;
 use bh3::lengths;
@@ -125,6 +131,43 @@ impl RunningJob {
     }
 }
 
+/// A picture Bonsai is describing for the reference cards with this picture and role.
+#[derive(Clone, Debug)]
+struct DescribeJob {
+    id: JobId,
+    path: PathBuf,
+    role: RefRole,
+    /// The description when it was asked for (an explicit "Describe with Bonsai" replaces it,
+    /// unless the user changes it meanwhile).
+    replaces: String,
+    /// `AppState::time` when it was asked for.
+    started: f64,
+    phase: String,
+    cancel_requested: bool,
+}
+
+impl DescribeJob {
+    fn status_text(&self, now: f64) -> String {
+        let secs = widgets::fmt_secs((now - self.started).max(0.0) as u64);
+        match self.phase.as_str() {
+            phase::QUEUED => format!("Waiting for the job before... {secs}"),
+            phase::STARTING | phase::LOADING | phase::WAIT_STOP | phase::CANCELLING => {
+                format!("{} {secs}", self.phase)
+            }
+            _ => format!("Describing... {secs}"),
+        }
+    }
+}
+
+/// What a reference card shows after a describe ended without writing its text.
+#[derive(Clone, Debug, PartialEq)]
+enum DescribeNote {
+    /// The describe failed (the error, ready to show).
+    Failed(String),
+    /// The user changed the text while Bonsai looked: its description is offered instead.
+    Offer(String),
+}
+
 /// Where the numbers of the Last run panel come from.
 #[derive(Clone, Debug, PartialEq)]
 enum RunSource {
@@ -192,6 +235,10 @@ pub struct WriteState {
     /// The text this workspace last put into `app.activity`.
     activity: Option<String>,
     draft: DraftSaver,
+    /// Pictures being described, at most one job per picture and role.
+    describes: Vec<DescribeJob>,
+    /// Failures and offers of finished describes, per picture and role.
+    describe_notes: HashMap<(PathBuf, RefRole), DescribeNote>,
 }
 
 impl WriteState {
@@ -243,6 +290,41 @@ impl WriteState {
             let title = if entry.title.trim().is_empty() { "the entry" } else { entry.title.trim() };
             Undo::new(format!("Opened \u{201c}{title}\u{201d} from History"), true, saved)
         });
+    }
+
+    /// Put Bonsai's description of `path` for `role` into the cards with that picture and role
+    /// ([`describe::apply`]: an empty text, Bonsai's own text, or still `replaces`). A card whose
+    /// text the user changed meanwhile keeps it and gets the description offered. Returns the
+    /// number of cards written.
+    fn take_description(&mut self, path: &Path, role: RefRole, text: &str, replaces: &str) -> usize {
+        let (mut written, mut offered) = (0, false);
+        for r in self.spec.refs.iter_mut().filter(|r| r.image_path.as_deref() == Some(path) && r.role == role) {
+            if describe::apply(r, text, replaces) {
+                written += 1;
+            } else {
+                offered = true;
+            }
+        }
+        let key = (path.to_path_buf(), role);
+        if offered {
+            self.describe_notes.insert(key, DescribeNote::Offer(text.to_string()));
+        } else {
+            self.describe_notes.remove(&key);
+        }
+        written
+    }
+
+    /// The describe job of a card (its picture and role).
+    fn describe_job_of(&self, r: &RefImage) -> Option<&DescribeJob> {
+        let path = r.image_path.as_deref()?;
+        self.describes.iter().find(|d| d.path == path && d.role == r.role)
+    }
+
+    /// The first used reference whose picture is being described (`Ref 2`), if any.
+    fn describing_ref(&self) -> Option<String> {
+        let mode = self.spec.mode;
+        let used = &self.spec.refs[..self.spec.refs.len().min(request::max_refs(mode))];
+        used.iter().position(|r| self.describe_job_of(r).is_some()).map(|i| ref_name(mode, i))
     }
 
     /// Keep the request text in step with the form until it is edited.
@@ -668,6 +750,34 @@ struct Actions {
     dismiss_undo: bool,
     show_earlier: bool,
     dismiss_earlier: bool,
+    /// What the reference cards asked for (pictures picked, roles changed, describes).
+    refs: Vec<RefEvent>,
+    /// The Tips panel's "Describe pictures automatically" changed.
+    auto_describe_changed: bool,
+}
+
+/// A reference card event that needs the service (handled in `apply_actions`).
+#[derive(Debug, Clone, PartialEq)]
+enum RefEvent {
+    /// A new picture in a card; `more` were picked with it (added as new references).
+    Picked {
+        index: usize,
+        more: Vec<PathBuf>,
+    },
+    /// A card's role changed from `from`.
+    RoleChanged {
+        index: usize,
+        from: RefRole,
+    },
+    /// "Describe with Bonsai" / "Re-describe" (`fresh`: skip the saved description).
+    Describe {
+        index: usize,
+        fresh: bool,
+    },
+    CancelDescribe(usize),
+    /// Use the offered description (it replaces the card's text).
+    UseOffer(usize),
+    DismissNote(usize),
 }
 
 /// A line next to the Write button.
@@ -719,12 +829,22 @@ fn view_of(app: &AppState) -> View {
     };
     let ws = &app.write;
     let empty = ws.edited && ws.text.trim().is_empty();
+    let describing = if ws.edited { None } else { ws.describing_ref() };
     let (can_write, hint) = if empty {
         (
             false,
             Some(Hint {
                 text: "The request text is empty: type a request or rebuild it from the form".to_string(),
                 color: Palette::WARN,
+                open: None,
+            }),
+        )
+    } else if let Some(name) = describing {
+        (
+            false,
+            Some(Hint {
+                text: format!("Bonsai is describing the picture of {name}: the prompt is written from that text"),
+                color: Palette::TEXT_DIM,
                 open: None,
             }),
         )
@@ -757,7 +877,7 @@ pub fn show(app: &mut AppState, ctx: &egui::Context) {
         .default_width(250.0)
         .width_range(200.0..=380.0)
         .frame(side_frame())
-        .show(ctx, |ui| left_panel(ui, &mut app.write, &app.library));
+        .show(ctx, |ui| left_panel(ui, &mut app.write, &app.library, &mut app.config, &mut acts));
 
     egui::SidePanel::right("write-right")
         .resizable(true)
@@ -784,6 +904,10 @@ pub fn show(app: &mut AppState, ctx: &egui::Context) {
 }
 
 pub fn on_event(app: &mut AppState, ev: &bh3::service::Event) {
+    if describe_event(app, ev) {
+        update_activity(app);
+        return;
+    }
     let ws = &mut app.write;
     let current = ws.job.as_ref().map(|j| j.id);
     let mut toasts: Vec<(ToastKind, String)> = Vec::new();
@@ -842,6 +966,173 @@ pub fn on_event(app: &mut AppState, ev: &bh3::service::Event) {
         app.toast(kind, text);
     }
     update_activity(app);
+}
+
+/// Events of this workspace's describe jobs (true when `ev` was one).
+fn describe_event(app: &mut AppState, ev: &Event) -> bool {
+    let id = match ev {
+        Event::JobPhase { id, .. } | Event::DescribeDone { id, .. } | Event::JobFailed { id, .. } => *id,
+        Event::JobCancelled(id) => *id,
+        _ => return false,
+    };
+    let ws = &mut app.write;
+    let Some(pos) = ws.describes.iter().position(|d| d.id == id) else { return false };
+    match ev {
+        Event::JobPhase { phase, .. } => {
+            let job = &mut ws.describes[pos];
+            if !job.cancel_requested {
+                job.phase = phase.clone();
+            }
+        }
+        Event::DescribeDone { outcome, .. } => {
+            let job = ws.describes.remove(pos);
+            if !job.cancel_requested {
+                ws.take_description(&job.path, job.role, &outcome.description, &job.replaces);
+            }
+            if outcome.timings.is_some() {
+                app.last_timings = outcome.timings.clone();
+            }
+        }
+        Event::JobFailed { error, .. } => {
+            let job = ws.describes.remove(pos);
+            let shown = ws.spec.refs.iter().any(|r| r.image_path.as_deref() == Some(job.path.as_path()));
+            ws.describe_notes.insert((job.path, job.role), DescribeNote::Failed(error.clone()));
+            if !shown {
+                app.toast(ToastKind::Error, format!("Describing a picture failed: {error}"));
+            }
+        }
+        _ => {
+            ws.describes.remove(pos);
+        }
+    }
+    true
+}
+
+/// A card's picture is described without asking: the setting is on, the card has a picture that
+/// is not sent itself, and its text is empty or still Bonsai's own (typed text is never replaced).
+fn wants_auto_describe(r: &RefImage, auto: bool) -> bool {
+    auto && r.image_path.is_some() && !r.send_image && r.may_auto_describe()
+}
+
+/// After a role change the picture is described again for the new role only when its text is
+/// still Bonsai's untouched text (or empty), with the setting on.
+fn redescribe_on_role_change(r: &RefImage, auto: bool) -> bool {
+    auto && r.image_path.is_some() && !r.send_image && r.may_auto_describe()
+}
+
+/// Ask Bonsai to describe the picture of reference `index` for its role (`fresh`: skip the
+/// saved description). Never in the demo; a server known to have no vision projector gives the
+/// error at once.
+fn start_describe(app: &mut AppState, index: usize, fresh: bool) {
+    if widgets::demo_mode() {
+        return;
+    }
+    let ws = &mut app.write;
+    let Some(r) = ws.spec.refs.get(index) else { return };
+    let Some(path) = r.image_path.clone() else { return };
+    let role = r.role;
+    if ws.describe_job_of(r).is_some() {
+        return;
+    }
+    let replaces = r.description.clone();
+    let key = (path.clone(), role);
+    if !path.is_file() {
+        let text = format!("The picture is not found: {}", path.display());
+        ws.describe_notes.insert(key, DescribeNote::Failed(text));
+        return;
+    }
+    if app.status.props.as_ref().is_some_and(|p| !p.vision) {
+        ws.describe_notes.insert(key, DescribeNote::Failed(capitalize(describe::NO_VISION)));
+        return;
+    }
+    ws.describe_notes.remove(&key);
+    let id = app.submit(JobKind::Describe { image: path.clone(), role, use_cache: !fresh });
+    let job =
+        DescribeJob { id, path, role, replaces, started: app.time, phase: String::new(), cancel_requested: false };
+    app.write.describes.push(job);
+}
+
+/// Handle what the reference cards asked for, then cancel describes no card needs any more
+/// (picture removed or replaced, role changed).
+fn apply_ref_events(app: &mut AppState, events: Vec<RefEvent>) {
+    let auto = app.config.auto_describe;
+    for event in events {
+        match event {
+            RefEvent::Picked { index, more } => {
+                let mut cards = vec![index];
+                let ws = &mut app.write;
+                let mode = ws.spec.mode;
+                let max = request::max_refs(mode);
+                let mut left_out = 0;
+                for path in more {
+                    if ws.spec.refs.len() >= max {
+                        left_out += 1;
+                        continue;
+                    }
+                    let role = new_ref_role(mode, &ws.spec.refs);
+                    ws.spec.refs.push(RefImage { role, image_path: Some(path), ..RefImage::default() });
+                    cards.push(ws.spec.refs.len() - 1);
+                }
+                if left_out > 0 {
+                    let text = format!("{mode} uses at most {max} pictures: {left_out} picked picture(s) left out");
+                    app.toast(ToastKind::Warn, text);
+                }
+                for i in cards {
+                    if app.write.spec.refs.get(i).is_some_and(|r| wants_auto_describe(r, auto)) {
+                        start_describe(app, i, false);
+                    }
+                }
+            }
+            RefEvent::RoleChanged { index, from } => {
+                let Some(r) = app.write.spec.refs.get(index) else { continue };
+                if r.role != from && redescribe_on_role_change(r, auto) {
+                    start_describe(app, index, false);
+                }
+            }
+            RefEvent::Describe { index, fresh } => start_describe(app, index, fresh),
+            RefEvent::CancelDescribe(index) => {
+                let ws = &mut app.write;
+                let Some(r) = ws.spec.refs.get(index) else { continue };
+                let Some(path) = r.image_path.clone() else { continue };
+                let role = r.role;
+                if let Some(job) = ws.describes.iter_mut().find(|d| d.path == path && d.role == role) {
+                    job.cancel_requested = true;
+                    job.phase = phase::CANCELLING.to_string();
+                    let id = job.id;
+                    app.cancel(id);
+                }
+            }
+            RefEvent::UseOffer(index) => {
+                let ws = &mut app.write;
+                let Some(r) = ws.spec.refs.get_mut(index) else { continue };
+                let Some(key) = r.image_path.clone().map(|p| (p, r.role)) else { continue };
+                if let Some(DescribeNote::Offer(text)) = ws.describe_notes.remove(&key) {
+                    r.description = text.clone();
+                    r.auto_description = Some(text);
+                }
+            }
+            RefEvent::DismissNote(index) => {
+                let ws = &mut app.write;
+                let Some(r) = ws.spec.refs.get(index) else { continue };
+                if let Some(path) = r.image_path.clone() {
+                    let role = r.role;
+                    ws.describe_notes.remove(&(path, role));
+                }
+            }
+        }
+    }
+    // Describes no card needs any more.
+    let ws = &mut app.write;
+    let needed = |d: &DescribeJob| {
+        ws.spec.refs.iter().any(|r| r.image_path.as_deref() == Some(d.path.as_path()) && r.role == d.role)
+    };
+    let stale: Vec<JobId> = ws.describes.iter().filter(|d| !d.cancel_requested && !needed(d)).map(|d| d.id).collect();
+    for id in stale {
+        if let Some(job) = app.write.describes.iter_mut().find(|d| d.id == id) {
+            job.cancel_requested = true;
+        }
+        app.cancel(id);
+    }
 }
 
 fn take_background(background: &mut Vec<RunningJob>, id: JobId) -> Option<RunningJob> {
@@ -908,6 +1199,7 @@ fn load_demo(app: &mut AppState) {
                     .to_string(),
                 image_path: None,
                 send_image: false,
+                auto_description: None,
             },
             RefImage {
                 role: RefRole::Place,
@@ -916,6 +1208,7 @@ fn load_demo(app: &mut AppState) {
                     .to_string(),
                 image_path: None,
                 send_image: false,
+                auto_description: None,
             },
         ],
         duration_s: 6,
@@ -993,9 +1286,13 @@ fn read_shortcuts(app: &AppState, ctx: &egui::Context, acts: &mut Actions) {
     });
 }
 
-fn apply_actions(app: &mut AppState, ctx: &egui::Context, acts: Actions, view: &View) {
+fn apply_actions(app: &mut AppState, ctx: &egui::Context, mut acts: Actions, view: &View) {
     if acts.cancel {
         cancel_job(app);
+    }
+    apply_ref_events(app, std::mem::take(&mut acts.refs));
+    if acts.auto_describe_changed {
+        app.write.config_dirty = true;
     }
     if let Some(id) = acts.cancel_background {
         app.cancel(id);
@@ -1062,6 +1359,15 @@ pub fn update_activity(app: &mut AppState) {
         Some(job) if ours || job.phase != phase::QUEUED => Some(job.status_text(now)),
         Some(_) => return,
         None if !ws.background.is_empty() && ours => Some("Writing an earlier prompt...".to_string()),
+        None if ours => ws.describes.iter().find(|d| !d.cancel_requested).map(|d| {
+            let name = ws
+                .spec
+                .refs
+                .iter()
+                .position(|r| r.image_path.as_deref() == Some(d.path.as_path()) && r.role == d.role)
+                .map_or_else(|| "a picture".to_string(), |i| ref_name(ws.spec.mode, i));
+            format!("{name}: {}", d.status_text(now))
+        }),
         None => None,
     };
     match text {
@@ -1243,7 +1549,7 @@ fn side_frame() -> egui::Frame {
     egui::Frame::new().fill(Palette::SIDE).inner_margin(Margin::symmetric(6, 6))
 }
 
-fn left_panel(ui: &mut Ui, ws: &mut WriteState, library: &Library) {
+fn left_panel(ui: &mut Ui, ws: &mut WriteState, library: &Library, config: &mut AppConfig, acts: &mut Actions) {
     ScrollArea::vertical().id_salt("write-left-scroll").auto_shrink([false, false]).show(ui, |ui| {
         widgets::panel(ui, "write-mode", "Mode", true, |ui| {
             let mut mode = ws.spec.mode;
@@ -1289,10 +1595,7 @@ fn left_panel(ui: &mut Ui, ws: &mut WriteState, library: &Library) {
         });
 
         widgets::panel(ui, "write-tips", "Tips", true, |ui| {
-            let image_tip = format!(
-                "Describe pictures in words: sending an image costs ~{} tokens and ~{IMAGE_SECONDS} s each.",
-                thousands(IMAGE_TOKENS as u64)
-            );
+            let image_tip = picture_tip(config.auto_describe);
             for tip in [
                 "One continuous action per shot works best.",
                 image_tip.as_str(),
@@ -1301,8 +1604,32 @@ fn left_panel(ui: &mut Ui, ws: &mut WriteState, library: &Library) {
             ] {
                 bullet(ui, tip);
             }
+            ui.add_space(2.0);
+            let resp = ui.checkbox(&mut config.auto_describe, "Describe pictures automatically").on_hover_text(
+                "When you pick a picture for a reference with an empty description, Bonsai looks at it once and \
+                 writes the description (also in Settings > Prompt writing)",
+            );
+            if resp.changed() {
+                acts.auto_describe_changed = true;
+            }
         });
     });
+}
+
+/// The Tips line about pictures (with or without automatic descriptions).
+fn picture_tip(auto_describe: bool) -> String {
+    if auto_describe {
+        format!(
+            "Pick a picture: Bonsai describes it once (~{IMAGE_SECONDS} s) and the prompt is written from that text - \
+             edit the description if something is wrong."
+        )
+    } else {
+        format!(
+            "Describe pictures in words, or use \"Describe with Bonsai\" on a card (~{IMAGE_SECONDS} s, once). Sending \
+             the picture itself costs ~{} tokens and ~{IMAGE_SECONDS} s with every prompt.",
+            thousands(IMAGE_TOKENS as u64)
+        )
+    }
 }
 
 /// Template titles without the long "(turn ... ON in ComfyUI)" part, capitalised.
@@ -1350,7 +1677,7 @@ fn request_area(ui: &mut Ui, ws: &mut WriteState, view: &View, acts: &mut Action
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(Palette::REGION).inner_margin(Margin { left: 8, right: 2, top: 6, bottom: 0 }))
         .show_inside(ui, |ui| match ws.tab {
-            RequestTab::Builder => builder(ui, ws, &warnings),
+            RequestTab::Builder => builder(ui, ws, &warnings, view.now, acts),
             RequestTab::Text => text_tab(ui, ws),
         });
 }
@@ -1470,14 +1797,15 @@ fn action_bar(ui: &mut Ui, ws: &WriteState, view: &View, acts: &mut Actions) {
 
 // --- Builder ---------------------------------------------------------------------------------
 
-fn builder(ui: &mut Ui, ws: &mut WriteState, warnings: &[String]) {
+fn builder(ui: &mut Ui, ws: &mut WriteState, warnings: &[String], now: f64, acts: &mut Actions) {
     ScrollArea::vertical().id_salt("write-builder-scroll").auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(2.0);
         if ws.edited {
             edited_banner(ui, ws);
             ui.add_space(6.0);
         }
-        references_panel(ui, &mut ws.spec);
+        let dv = DescribeView { now, jobs: &ws.describes, notes: &ws.describe_notes };
+        acts.refs.extend(references_panel(ui, &mut ws.spec, &dv));
         shot_panel(ui, &mut ws.spec);
         look_panel(ui, &mut ws.spec);
         dialogue_panel(ui, &mut ws.spec);
@@ -1536,12 +1864,34 @@ enum RefAction {
     Up(usize),
     Down(usize),
     Remove(usize),
+    /// Handled with the service ([`RefEvent`]).
+    Event(RefEvent),
 }
 
-fn references_panel(ui: &mut Ui, spec: &mut RequestSpec) {
+/// What the reference cards show about describing.
+struct DescribeView<'a> {
+    now: f64,
+    jobs: &'a [DescribeJob],
+    notes: &'a HashMap<(PathBuf, RefRole), DescribeNote>,
+}
+
+impl DescribeView<'_> {
+    fn job(&self, r: &RefImage) -> Option<&DescribeJob> {
+        let path = r.image_path.as_deref()?;
+        self.jobs.iter().find(|d| d.path == path && d.role == r.role)
+    }
+
+    fn note(&self, r: &RefImage) -> Option<&DescribeNote> {
+        self.notes.get(&(r.image_path.clone()?, r.role))
+    }
+}
+
+/// The References panel; returns what needs the service (pictures picked, roles changed, describes).
+fn references_panel(ui: &mut Ui, spec: &mut RequestSpec, dv: &DescribeView<'_>) -> Vec<RefEvent> {
     let mode = spec.mode;
     let max = request::max_refs(mode);
     let title = format!("References  ·  {}/{max}", spec.refs.len().min(max));
+    let mut events = Vec::new();
     widgets::panel(ui, "write-refs", &title, true, |ui| {
         let RequestSpec { refs, first_frame_pinned, .. } = spec;
         if mode == Mode::R2v {
@@ -1565,8 +1915,12 @@ fn references_panel(ui: &mut Ui, spec: &mut RequestSpec) {
         let count = refs.len();
         let mut action = None;
         for (i, r) in refs.iter_mut().enumerate() {
-            if let Some(a) = ref_card(ui, mode, i, count, r, first_frame_pinned) {
+            let role = r.role;
+            if let Some(a) = ref_card(ui, mode, i, count, r, first_frame_pinned, dv) {
                 action = Some(a);
+            }
+            if r.role != role {
+                events.push(RefEvent::RoleChanged { index: i, from: role });
             }
             ui.add_space(4.0);
         }
@@ -1579,6 +1933,7 @@ fn references_panel(ui: &mut Ui, spec: &mut RequestSpec) {
                     ui.ctx().forget_image(&util::file_uri(path));
                 }
             }
+            Some(RefAction::Event(event)) => events.push(event),
             _ => {}
         }
         ui.horizontal(|ui| {
@@ -1600,6 +1955,7 @@ fn references_panel(ui: &mut Ui, spec: &mut RequestSpec) {
             ui.label(RichText::new("Order = the Load Image order in ComfyUI").small().color(Palette::TEXT_DIM));
         });
     });
+    events
 }
 
 /// Role of an added picture: the first / last frame in f2v; the place after a person in r2v.
@@ -1627,6 +1983,7 @@ fn ref_card(
     count: usize,
     r: &mut RefImage,
     pinned: &mut bool,
+    dv: &DescribeView<'_>,
 ) -> Option<RefAction> {
     let name = ref_name(mode, index);
     let unused = index >= request::max_refs(mode);
@@ -1642,7 +1999,9 @@ fn ref_card(
                 ui.multiply_opacity(0.55);
             }
             ui.horizontal_top(|ui| {
-                thumb_slot(ui, r, &name);
+                if let Some(more) = thumb_slot(ui, r, &name) {
+                    action = Some(RefAction::Event(RefEvent::Picked { index, more }));
+                }
                 ui.vertical(|ui| {
                     let narrow = ui.available_width() < 470.0;
                     egui::Sides::new().height(22.0).show(
@@ -1679,13 +2038,19 @@ fn ref_card(
                             }
                         },
                     );
+                    let describing = dv.job(r).is_some();
+                    let hint =
+                        if describing { "Bonsai is looking at the picture..." } else { role_hint(mode, index, r.role) };
                     ui.add(
                         TextEdit::multiline(&mut r.description)
                             .id_salt(("write-ref-desc", index))
                             .desired_rows(2)
                             .desired_width(f32::INFINITY)
-                            .hint_text(role_hint(mode, index, r.role)),
+                            .hint_text(hint),
                     );
+                    if let Some(event) = describe_row(ui, index, r, dv) {
+                        action = Some(RefAction::Event(event));
+                    }
                     if unused {
                         let text = match mode {
                             Mode::R2v => "Not used: r2v takes Ref 1 to Ref 9",
@@ -1720,13 +2085,78 @@ fn role_combo(ui: &mut Ui, mode: Mode, index: usize, r: &mut RefImage, pinned: &
     }
 }
 
+/// Under a card's description, for a card with a picture: describing (spinner, time, Cancel),
+/// "written by Bonsai" with Re-describe, an error or an offered description, or "Describe with
+/// Bonsai" when the text is the user's own (or empty).
+fn describe_row(ui: &mut Ui, index: usize, r: &RefImage, dv: &DescribeView<'_>) -> Option<RefEvent> {
+    r.image_path.as_ref()?;
+    let mut event = None;
+    let small = |text: &str, color: Color32| RichText::new(text).small().color(color);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        if let Some(job) = dv.job(r) {
+            ui.add(egui::Spinner::new().size(12.0).color(theme::accent(ui.ctx())));
+            ui.label(small(&job.status_text(dv.now), Palette::TEXT));
+            let cancel = ui.add_enabled(!job.cancel_requested, egui::Button::new("Cancel").small());
+            if cancel.on_hover_text("Stop describing this picture").clicked() {
+                event = Some(RefEvent::CancelDescribe(index));
+            }
+            return;
+        }
+        match dv.note(r) {
+            Some(DescribeNote::Failed(error)) => {
+                if ui.small_button("Retry").on_hover_text("Ask Bonsai to describe the picture again").clicked() {
+                    event = Some(RefEvent::Describe { index, fresh: false });
+                }
+                if ui.small_button("✖").on_hover_text("Hide the error").clicked() {
+                    event = Some(RefEvent::DismissNote(index));
+                }
+                let text = format!("{} {error}", icons::WARN);
+                ui.add(egui::Label::new(small(&text, Palette::ERR)).truncate()).on_hover_text(error);
+            }
+            Some(DescribeNote::Offer(text)) => {
+                if ui.small_button("Use it").on_hover_text("Replace your text with Bonsai's description").clicked() {
+                    event = Some(RefEvent::UseOffer(index));
+                }
+                if ui.small_button("✖").on_hover_text("Keep your text").clicked() {
+                    event = Some(RefEvent::DismissNote(index));
+                }
+                let label = format!("{} Bonsai's description is ready - your text was kept", icons::INFO);
+                ui.add(egui::Label::new(small(&label, Palette::INFO)).truncate()).on_hover_text(text);
+            }
+            None if r.description_is_auto() => {
+                let tip = "Re-describe: Bonsai looks at the picture again (~18 s; the saved description is skipped)";
+                if widgets::icon_button(ui, icons::RESTART, tip).clicked() {
+                    event = Some(RefEvent::Describe { index, fresh: true });
+                }
+                let label = format!("{} written by Bonsai - edit freely", icons::CHECK);
+                ui.label(small(&label, Palette::TEXT_DIM))
+                    .on_hover_text("Bonsai described the picture once; the prompt is written from this text");
+            }
+            None => {
+                let tip = if r.description.trim().is_empty() {
+                    format!("Bonsai looks at the picture once (~{IMAGE_SECONDS} s) and writes the description")
+                } else {
+                    format!("Replace your text with Bonsai's description of the picture (~{IMAGE_SECONDS} s)")
+                };
+                let button = egui::Button::new(format!("{} Describe with Bonsai", icons::IMAGE)).small();
+                if ui.add(button).on_hover_text(tip).clicked() {
+                    event = Some(RefEvent::Describe { index, fresh: false });
+                }
+            }
+        }
+    });
+    event
+}
+
 fn send_checkbox(ui: &mut Ui, r: &mut RefImage, narrow: bool) {
     let label = if narrow { "Send" } else { "Send to Bonsai" };
     let enabled = r.image_path.is_some() || r.send_image;
     let resp = ui.add_enabled(enabled, egui::Checkbox::new(&mut r.send_image, label));
     resp.on_hover_text(format!(
-        "Send the picture itself to Bonsai's vision input: ~{} tokens and ~{IMAGE_SECONDS} s each.\n\
-         Describing it in words is usually enough.",
+        "Send the picture itself to Bonsai with every prompt: ~{} tokens and ~{IMAGE_SECONDS} s each time.\n\
+         Off (default): Bonsai describes the picture once in words and the prompt is written from that text - \
+         faster, cache-friendly, and you can correct the description.",
         thousands(IMAGE_TOKENS as u64)
     ))
     .on_disabled_hover_text("Pick an image first (click the slot on the left)");
@@ -1736,8 +2166,8 @@ fn send_checkbox(ui: &mut Ui, r: &mut RefImage, narrow: bool) {
 }
 
 /// 56x56 picture slot: the thumbnail, or "Pick image..." when there is none. Click to choose a
-/// file, right-click for more.
-fn thumb_slot(ui: &mut Ui, r: &mut RefImage, name: &str) {
+/// file (or several: the others become new references, returned), right-click for more.
+fn thumb_slot(ui: &mut Ui, r: &mut RefImage, name: &str) -> Option<Vec<PathBuf>> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(THUMB, THUMB), Sense::click());
     let radius = CornerRadius::same(4);
     let inner = rect.size() - egui::vec2(4.0, 4.0);
@@ -1768,7 +2198,8 @@ fn thumb_slot(ui: &mut Ui, r: &mut RefImage, name: &str) {
                 let pos = rect.center() + egui::vec2(0.0, dy);
                 ui.painter().text(pos, Align2::CENTER_CENTER, line, FontId::proportional(11.5), color);
             }
-            "Pick image... (optional)\nA thumbnail for you: the picture is sent to Bonsai only with \"Send to Bonsai\""
+            "Pick image... (optional; several at once add references)\nBonsai describes the picture once in words; \
+             the picture itself is sent with the prompt only with \"Send to Bonsai\""
                 .to_string()
         }
     };
@@ -1808,12 +2239,16 @@ fn thumb_slot(ui: &mut Ui, r: &mut RefImage, name: &str) {
     });
     resp.on_hover_text(tooltip);
 
+    let mut more = None;
     if pick {
-        if let Some(path) = util::pick_image(&format!("Picture for {name}")) {
+        let mut picked = util::pick_images(&format!("Picture for {name} (pick several to add more references)"));
+        if !picked.is_empty() {
             if let Some(old) = &existing {
                 ui.ctx().forget_image(&util::file_uri(old));
             }
-            r.image_path = Some(path);
+            let first = picked.remove(0);
+            r.image_path = Some(first);
+            more = Some(picked);
         }
     }
     if remove {
@@ -1823,6 +2258,7 @@ fn thumb_slot(ui: &mut Ui, r: &mut RefImage, name: &str) {
         r.image_path = None;
         r.send_image = false;
     }
+    more
 }
 
 fn shot_panel(ui: &mut Ui, spec: &mut RequestSpec) {
@@ -2997,6 +3433,66 @@ mod tests {
         let mut ws = WriteState { spec: default_spec(Mode::R2v, 6), initialized: true, ..WriteState::default() };
         ws.sync_text();
         ws
+    }
+
+    #[test]
+    fn pictures_are_described_without_overwriting_typed_text() {
+        let pic = PathBuf::from("cafe.png");
+        let card = |description: &str| RefImage {
+            role: RefRole::Place,
+            description: description.to_string(),
+            image_path: Some(pic.clone()),
+            ..RefImage::default()
+        };
+        // Auto describe: only a picture with an empty (or Bonsai's own) text, setting on, not sent itself.
+        assert!(wants_auto_describe(&card(""), true));
+        assert!(!wants_auto_describe(&card(""), false), "setting off");
+        assert!(!wants_auto_describe(&card("my words"), true), "typed text");
+        assert!(!wants_auto_describe(&RefImage { send_image: true, ..card("") }, true), "sent itself");
+        assert!(!wants_auto_describe(&RefImage { image_path: None, ..card("") }, true), "no picture");
+        let auto = RefImage { auto_description: Some("a cafe".into()), ..card("a cafe") };
+        assert!(wants_auto_describe(&auto, true) && redescribe_on_role_change(&auto, true));
+        let edited = RefImage { auto_description: Some("a cafe".into()), ..card("a cafe, edited") };
+        assert!(!redescribe_on_role_change(&edited, true), "edited auto text is the user's");
+
+        let mut ws = fresh();
+        ws.spec.refs = vec![card(""), card("my own words"), RefImage { role: RefRole::Person, ..card("") }];
+        assert_eq!(ws.take_description(&pic, RefRole::Place, "an empty cafe", ""), 1);
+        assert_eq!(ws.spec.refs[0].description, "an empty cafe");
+        assert!(ws.spec.refs[0].description_is_auto());
+        assert_eq!(ws.spec.refs[1].description, "my own words", "typed text is kept");
+        assert_eq!(ws.spec.refs[2].description, "", "another role is not touched");
+        assert_eq!(
+            ws.describe_notes.get(&(pic.clone(), RefRole::Place)),
+            Some(&DescribeNote::Offer("an empty cafe".into())),
+            "offered to the card with typed text"
+        );
+        ws.sync_text();
+        assert!(ws.text.contains("Ref 1: an empty cafe (place)."), "{}", ws.text);
+        // "Describe with Bonsai" on the typed card replaces the text it was asked for.
+        assert_eq!(ws.take_description(&pic, RefRole::Place, "a bar", "my own words"), 2);
+        assert_eq!(ws.spec.refs[1].description, "a bar");
+        assert_eq!(ws.describe_notes.get(&(pic.clone(), RefRole::Place)), None);
+        // A card being described blocks the Write button's request until the text is in.
+        ws.describes.push(DescribeJob {
+            id: 7,
+            path: pic.clone(),
+            role: RefRole::Person,
+            replaces: String::new(),
+            started: 0.0,
+            phase: String::new(),
+            cancel_requested: false,
+        });
+        assert_eq!(ws.describing_ref().as_deref(), Some("Ref 3"));
+        assert_eq!(ws.describes[0].status_text(12.4), "Describing... 12s");
+        ws.describes[0].phase = phase::QUEUED.to_string();
+        assert!(ws.describes[0].status_text(3.0).starts_with("Waiting"));
+    }
+
+    #[test]
+    fn picture_tip_follows_the_setting() {
+        assert!(picture_tip(true).starts_with("Pick a picture: Bonsai describes it once"));
+        assert!(picture_tip(false).contains("1,100 tokens"));
     }
 
     fn outcome(prompt: &str, ctx: &LintContext) -> WriteOutcome {

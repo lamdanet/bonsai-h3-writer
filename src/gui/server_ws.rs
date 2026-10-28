@@ -1,9 +1,11 @@
 //! Bonsai workspace: install info, start/stop, launcher options, live log, GPU.
 //!
-//! Left: Install (the Bonsai-demo folder and what was found in it) and Launch options (saved at
-//! once; context, projector and env changes apply on the next start). Centre: a status card with
-//! Start / Stop / Restart / Open web UI / Free GPU for ComfyUI, a GPU card (VRAM, load,
-//! temperature, processes) and the live server log (filter, autoscroll, wrap, copy, open file).
+//! Left: Install (the Bonsai-demo folder and what was found in it, or the app's own runtime) and
+//! Launch options (saved at once; context, projector and env changes apply on the next start).
+//! Centre: a status card with Start / Stop / Restart / Open web UI / Free GPU for ComfyUI, a GPU
+//! card (VRAM, load, temperature, processes) and below either the live server log (filter,
+//! autoscroll, wrap, copy, open file) or the Models area ([`super::models_ws`]), switched with the
+//! tabs in that area's header.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use eframe::egui::{
 };
 
 use super::app::{AppState, ToastKind};
+use super::models_ws;
 use super::theme::{self, Palette};
 use super::util;
 use super::widgets::{self, icons};
@@ -46,8 +49,17 @@ const ENV_EQ_W: f32 = 8.0;
 /// Process names longer than this are shortened in the GPU table (full name on hover).
 const PROCESS_NAME_CHARS: usize = 26;
 
+/// What the bottom area of the centre shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BottomView {
+    #[default]
+    Log,
+    Models,
+}
+
 /// What the user asked for this frame (applied after drawing, when nothing is borrowed).
 enum Action {
+    ShowModels,
     Start,
     Stop,
     Restart,
@@ -94,6 +106,15 @@ pub struct ServerWsState {
     sizes: HashMap<PathBuf, Option<u64>>,
     /// Why the configured folder is not usable: (folder, error of `BonsaiInstall::detect`).
     folder_error: Option<(PathBuf, String)>,
+    /// Log or Models below the cards.
+    view: BottomView,
+}
+
+impl ServerWsState {
+    /// Show the Models area below the cards.
+    pub fn show_models(&mut self) {
+        self.view = BottomView::Models;
+    }
 }
 
 impl Default for ServerWsState {
@@ -110,6 +131,7 @@ impl Default for ServerWsState {
             file_checks: HashMap::new(),
             sizes: HashMap::new(),
             folder_error: None,
+            view: BottomView::Log,
         }
     }
 }
@@ -141,9 +163,17 @@ pub fn show(app: &mut AppState, ctx: &egui::Context) {
             .frame(egui::Frame::new().fill(Palette::REGION).outer_margin(Margin { bottom: 2, ..Margin::ZERO }))
             .show_separator_line(false)
             .show_inside(ui, |ui| cards_area(app, ui, &mut actions));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Palette::REGION))
-            .show_inside(ui, |ui| log_area(app, ui, &mut actions));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Palette::REGION)).show_inside(ui, |ui| {
+            match app.server_ws.view {
+                BottomView::Log => log_area(app, ui, &mut actions),
+                BottomView::Models => {
+                    let mut view = app.server_ws.view;
+                    bottom_header(ui, &mut view, |ui| models_ws::header_right(app, ui));
+                    app.server_ws.view = view;
+                    models_ws::area(app, ui);
+                }
+            }
+        });
     });
 
     if !actions.is_empty() {
@@ -191,6 +221,7 @@ fn same_run(seen: Option<f64>, now: Option<f64>) -> bool {
 
 fn apply(app: &mut AppState, ctx: &egui::Context, action: Action) {
     match action {
+        Action::ShowModels => app.server_ws.view = BottomView::Models,
         Action::Start => app.send(Command::StartServer),
         Action::Stop => app.send(Command::StopServer),
         Action::Restart => {
@@ -248,6 +279,10 @@ fn install_panel(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
         _ => None,
     };
     let sizes = install.as_ref().map(|i| model_sizes(app, i)).unwrap_or_default();
+    if let Some(install) = install.as_ref().filter(|i| i.runtime) {
+        runtime_panel(ui, install, &sizes, actions);
+        return;
+    }
 
     widgets::panel(ui, "srv-install", "Install", true, |ui| {
         widgets::section_label(ui, "Bonsai folder");
@@ -262,8 +297,9 @@ fn install_panel(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
             }
         }
         ui.horizontal(|ui| {
-            let change =
-                ui.button("Change...").on_hover_text("Choose the Bonsai-demo folder (detected installs, Browse...)");
+            let change = ui
+                .button("Change...")
+                .on_hover_text("Choose the Bonsai-demo folder, model files on this PC, or download Bonsai");
             if change.clicked() {
                 actions.push(Action::ChangeFolder);
             }
@@ -312,6 +348,77 @@ fn install_panel(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
         for warning in &warnings {
             note_line(ui, icons::WARN, warning, Palette::WARN);
         }
+    });
+}
+
+/// Install panel of the app's own runtime: server, model and projector where they are.
+fn runtime_panel(
+    ui: &mut Ui,
+    install: &BonsaiInstall,
+    sizes: &HashMap<PathBuf, Option<u64>>,
+    actions: &mut Vec<Action>,
+) {
+    widgets::panel(ui, "srv-install", "Install", true, |ui| {
+        widgets::section_label(ui, "App runtime");
+        ui.add(
+            egui::Label::new(
+                RichText::new("No Bonsai-demo folder needed: these files are started directly, where they are.")
+                    .small()
+                    .color(Palette::TEXT_DIM),
+            )
+            .wrap(),
+        );
+        ui.add_space(4.0);
+        let sized = |p: &Path| match sizes.get(p).copied().flatten() {
+            Some(bytes) => format!("{} · {}", file_name(p), fmt_bytes(bytes)),
+            None => file_name(p),
+        };
+        let folder = |p: &Path| models_ws::short_path(p.parent().unwrap_or(p), 2);
+        match &install.server_exe {
+            Some(p) if p.is_file() => part_row(
+                ui,
+                Part::Found,
+                "llama-server.exe",
+                &[format!("{} · {}", folder(p), install.backend().unwrap_or("?"))],
+            ),
+            Some(p) => part_row(ui, Part::Missing, "llama-server.exe", &[format!("{} not found", p.display())]),
+            None => part_row(ui, Part::Missing, "llama-server.exe", &["not installed - download it in Models".into()]),
+        }
+        match install.models.first() {
+            Some(p) if p.is_file() => part_row(ui, Part::Found, "Model", &[sized(p), format!("in {}", folder(p))]),
+            Some(p) => part_row(ui, Part::Missing, "Model", &[format!("{} not found", p.display())]),
+            None => part_row(ui, Part::Missing, "Model", &["none chosen".into()]),
+        }
+        match &install.mmproj {
+            Some(p) if p.is_file() => part_row(ui, Part::Found, "Vision projector", &[sized(p)]),
+            _ => part_row(ui, Part::Warn, "Vision projector", &["none - image input is off".into()]),
+        }
+        ui.add_space(4.0);
+        let problems = install.problems();
+        if problems.is_empty() {
+            ui.label(RichText::new(format!("{} Ready to start", icons::CHECK)).color(Palette::OK));
+        }
+        if !install.missing_dlls.is_empty() {
+            models_ws::vc_redist_note(ui, &install.missing_dlls);
+        }
+        // Missing files are marked on the lines above.
+        let shown = ["Visual C++", "llama-server build", "llama-server.exe not found", "No model", "Model file"];
+        for problem in problems.iter().filter(|p| !shown.iter().any(|s| p.contains(s))) {
+            note_line(ui, icons::CROSS, problem, Palette::ERR);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Models...").on_hover_text("Download, choose or delete models and server builds").clicked() {
+                actions.push(Action::ShowModels);
+            }
+            if ui
+                .button("Change...")
+                .on_hover_text("Setup: model files on this PC, download, or a Bonsai-demo folder")
+                .clicked()
+            {
+                actions.push(Action::ChangeFolder);
+            }
+        });
     });
 }
 
@@ -794,14 +901,24 @@ fn is_running(state: &ServerState) -> bool {
     matches!(state, ServerState::Starting | ServerState::Loading | ServerState::Ready)
 }
 
-/// A llama-server.exe the GPU lists while Bonsai is neither running nor stopping (e.g. it stopped
-/// answering, or a stop failed): it still holds the VRAM, and Stop ends it.
+/// A llama-server.exe of the chosen install that the GPU lists while Bonsai is neither running nor
+/// stopping (e.g. it stopped answering, or a stop failed): it still holds the VRAM, and Stop ends it.
+/// A llama-server started from other files (another app, another port) is not ours to stop.
 fn stray_server(app: &AppState) -> Option<&gpu::GpuProcess> {
     let state = &app.status.state;
     if is_running(state) || matches!(state, ServerState::Stopping) {
         return None;
     }
-    app.status.gpu.as_ref()?.processes.iter().find(|p| gpu::is_llama_server(&p.name))
+    let own_exe = app.status.install.as_ref().and_then(|i| i.server_exe.as_deref());
+    app.status.gpu.as_ref()?.processes.iter().find(|p| gpu::is_llama_server(&p.name) && same_server(&p.name, own_exe))
+}
+
+/// `name` (nvidia-smi's process name: usually the full path) is the install's server exe. A bare file
+/// name, or an install without a known exe, cannot be told apart and counts as ours.
+fn same_server(name: &str, own_exe: Option<&std::path::Path>) -> bool {
+    let (Some(own), true) = (own_exe, name.contains(['\\', '/'])) else { return true };
+    let norm = |t: &str| t.trim().replace('/', "\\").to_lowercase();
+    norm(name) == norm(&own.to_string_lossy())
 }
 
 fn state_color(state: &ServerState) -> Color32 {
@@ -840,7 +957,7 @@ fn state_hint(app: &AppState) -> String {
         ServerState::Stopped if stray_server(app).is_some() => {
             "llama-server.exe still runs but does not answer - Stop ends it and frees the GPU".into()
         }
-        ServerState::Stopped if !s.install_ok => "Choose a usable Bonsai folder first (Install > Change...)".into(),
+        ServerState::Stopped if !s.install_ok => "Bonsai is not set up yet - see Install (or Models)".into(),
         ServerState::Stopped if app.config.auto_start => {
             "Starts by itself when you write a prompt - or press Start".into()
         }
@@ -939,7 +1056,8 @@ fn status_card(app: &AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
 
     ui.add_space(8.0);
     let can_start = matches!(s.state, ServerState::Stopped | ServerState::Failed(_)) && s.install_ok;
-    let start_reason = if !s.install_ok { "Choose a usable Bonsai folder first" } else { "Bonsai is running already" };
+    let start_reason =
+        if !s.install_ok { "Bonsai is not set up yet - see Install" } else { "Bonsai is running already" };
     // Also a llama-server.exe that does not answer: it holds the GPU until it is stopped.
     let stray = stray_server(app);
     let can_stop = running || stray.is_some();
@@ -1253,8 +1371,9 @@ fn log_area(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
         lines.iter().filter(|line| filter.is_empty() || line.to_lowercase().contains(&filter)).collect();
     let total = lines.len();
     let st = &mut app.server_ws;
+    let mut view = st.view;
 
-    widgets::area_header(ui, "Log", |ui| {
+    bottom_header(ui, &mut view, |ui| {
         // Right to left: the rightmost button comes first.
         let open = ui
             .add_enabled(log_exists, egui::Button::new(format!("{} Open log file", icons::FOLDER)))
@@ -1307,6 +1426,7 @@ fn log_area(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
             }
         });
     });
+    st.view = view;
 
     if let Some(path) = &external_log {
         egui::Frame::new().inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
@@ -1350,6 +1470,39 @@ fn log_area(app: &mut AppState, ui: &mut Ui, actions: &mut Vec<Action>) {
                 ui.scroll_to_cursor(Some(Align::BOTTOM));
                 st.jump_to_end = false;
             }
+        });
+    });
+}
+
+/// Header strip of the bottom area: Log / Models tabs on the left (Blender editor tabs), then
+/// `add_right` laid out right-to-left.
+fn bottom_header(ui: &mut Ui, view: &mut BottomView, add_right: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().fill(Palette::HEADER).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 1.0;
+            for (tab, label, tip) in [
+                (BottomView::Log, format!("{} Log", icons::NOTE), "Bonsai's server log"),
+                (
+                    BottomView::Models,
+                    format!("{} Models", icons::LIBRARY),
+                    "Models and server builds: download, use, delete",
+                ),
+            ] {
+                let selected = *view == tab;
+                let button = egui::Button::new(RichText::new(label).color(if selected {
+                    Color32::WHITE
+                } else {
+                    Palette::TEXT
+                }))
+                .fill(if selected { Palette::BLUE } else { Palette::WIDGET })
+                .min_size(egui::vec2(78.0, 20.0));
+                if ui.add(button).on_hover_text(tip).clicked() {
+                    *view = tab;
+                }
+            }
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.with_layout(Layout::right_to_left(Align::Center), add_right);
         });
     });
 }
@@ -1534,6 +1687,15 @@ fn fmt_int(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_installs_server_counts_as_stray() {
+        let own = std::path::Path::new(r"C:\App\runtime\bin\llama-server.exe");
+        assert!(same_server(r"c:\app\runtime\bin\LLAMA-SERVER.EXE", Some(own)));
+        assert!(!same_server(r"D:\Bonsai-demo\bin\cuda\llama-server.exe", Some(own)));
+        assert!(same_server("llama-server.exe", Some(own)));
+        assert!(same_server(r"D:\x\llama-server.exe", None));
+    }
 
     #[test]
     fn log_lines_by_severity() {
